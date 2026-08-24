@@ -1,4 +1,4 @@
-rm -f stinger-installer.sh stinger stinger.bin config.toml 2>/dev/null
+rm -f stinger-installer.sh stinger stinger.bin config.toml stinger.log stinger.pid 2>/dev/null
 cat > stinger-installer.sh << 'EOF'
 #!/bin/bash
 set -e
@@ -18,21 +18,84 @@ print_info() { echo -e "${CYAN}[i]${NC} $1"; }
 BINARY_NAME="stinger"
 ORIGINAL_URL="https://github.com/lostsoul6/stinger-binary/raw/refs/heads/main/stinger"
 
+# ============================================
+# Start Stinger in Background (Automatic)
+# ============================================
+start_stinger() {
+    # Stop any existing instance first
+    pkill -f "stinger.bin" 2>/dev/null || true
+    pkill -x "stinger" 2>/dev/null || true
+    sleep 1
+    
+    print_status "Starting Stinger in background..."
+    nohup ./"${BINARY_NAME}" > stinger.log 2>&1 &
+    STINGER_PID=$!
+    echo "$STINGER_PID" > stinger.pid
+    
+    sleep 3
+    
+    if kill -0 "$STINGER_PID" 2>/dev/null; then
+        print_success "Stinger started successfully in background! (PID: $STINGER_PID)"
+        print_info "Logs are being saved to: stinger.log"
+        echo ""
+        print_header "📋 Last 5 lines of log:"
+        tail -n 5 stinger.log | sed 's/^/  /'
+    else
+        print_error "Failed to start Stinger. Check stinger.log for details."
+        echo ""
+        print_header "📋 Error log:"
+        cat stinger.log | sed 's/^/  /'
+    fi
+}
+
+# ============================================
+# Stop Stinger
+# ============================================
+stop_stinger() {
+    echo ""
+    print_header "🛑 Stopping Stinger..."
+    if [ -f "stinger.pid" ]; then
+        PID=$(cat stinger.pid)
+        if kill -0 "$PID" 2>/dev/null; then
+            kill "$PID"
+            print_success "Stinger stopped (PID: $PID)."
+            rm -f stinger.pid
+        else
+            print_warning "Process not running."
+            rm -f stinger.pid
+        fi
+    else
+        pkill -f "stinger.bin" 2>/dev/null || true
+        pkill -x "stinger" 2>/dev/null || true
+        print_success "Stinger processes killed."
+    fi
+}
+
+# ============================================
+# Uninstall Function
+# ============================================
 uninstall_stinger() {
     echo ""
     print_header "🗑️  Uninstalling Stinger..."
-    pkill -f "stinger.bin" 2>/dev/null || true
-    pkill -x "stinger" 2>/dev/null || true
+    stop_stinger
     [ -f "stinger" ] && rm -f "stinger" && print_success "Removed: stinger"
     [ -f "stinger.bin" ] && rm -f "stinger.bin" && print_success "Removed: stinger.bin"
     [ -f "stinger.original" ] && rm -f "stinger.original" && print_success "Removed: stinger.original"
     [ -f "config.toml" ] && rm -f "config.toml" && print_success "Removed: config.toml"
+    [ -f "stinger.log" ] && rm -f "stinger.log" && print_success "Removed: stinger.log"
     echo ""; print_success "✅ Uninstall completed! All files and processes removed."
 }
 
+# ============================================
+# Install & Start Server Function
+# ============================================
 install_server() {
-    echo ""; print_header "🖥️  Installing Stinger Server..."
-    if ! command -v wget &> /dev/null; then sudo apt-get update -qq && sudo apt-get install -y -qq wget file; fi
+    echo ""; print_header "🖥️  Installing & Starting Stinger Server..."
+    
+    if ! command -v wget &> /dev/null; then
+        print_warning "wget not found, installing..."
+        sudo apt-get update -qq && sudo apt-get install -y -qq wget file
+    fi
     
     print_status "Downloading stinger binary..."
     wget -q --show-progress -O "${BINARY_NAME}.original" "$ORIGINAL_URL" || { print_error "Download failed!"; return 1; }
@@ -55,27 +118,36 @@ WRAPPER
     echo ""
     read -p "  🌐 Enter Remote IP (Client IP or 0.0.0.0 for any) [0.0.0.0]: " REMOTE_IP
     REMOTE_IP=${REMOTE_IP:-0.0.0.0}
+    read -p "  🔗 Enter Server Port [8080]: " SERVER_PORT
+    SERVER_PORT=${SERVER_PORT:-8080}
     
+    print_status "Creating SERVER configuration..."
     cat > config.toml << EOF
 mode = "server"
 remote_ip = "${REMOTE_IP}"
 
 [server]
 host = "0.0.0.0"
-port = 8080
+port = ${SERVER_PORT}
 EOF
     
     chmod +x "${BINARY_NAME}"
-    print_success "✅ Server setup completed! (mode=server, remote_ip=${REMOTE_IP})"
+    print_success "✅ Server setup completed! (mode=server, remote_ip=${REMOTE_IP}, port=${SERVER_PORT})"
     
     echo ""
-    read -p "  ▶️ Run Stinger Server now? (y/N): " RUN_NOW
-    if [[ $RUN_NOW =~ ^[Yy]$ ]]; then ./"${BINARY_NAME}"; else print_info "Run it later with: ./stinger"; fi
+    start_stinger
 }
 
+# ============================================
+# Install & Start Client Function
+# ============================================
 install_client() {
-    echo ""; print_header "💻 Installing Stinger Client..."
-    if ! command -v wget &> /dev/null; then sudo apt-get update -qq && sudo apt-get install -y -qq wget file; fi
+    echo ""; print_header "💻 Installing & Starting Stinger Client..."
+    
+    if ! command -v wget &> /dev/null; then
+        print_warning "wget not found, installing..."
+        sudo apt-get update -qq && sudo apt-get install -y -qq wget file
+    fi
     
     print_status "Downloading stinger binary..."
     wget -q --show-progress -O "${BINARY_NAME}.original" "$ORIGINAL_URL" || { print_error "Download failed!"; return 1; }
@@ -101,6 +173,7 @@ WRAPPER
     read -p "  🔗 Enter Server Port [8080]: " SERVER_PORT
     SERVER_PORT=${SERVER_PORT:-8080}
     
+    print_status "Creating CLIENT configuration..."
     cat > config.toml << EOF
 mode = "client"
 remote_ip = "${SERVER_IP}"
@@ -111,25 +184,39 @@ server_port = ${SERVER_PORT}
 EOF
     
     chmod +x "${BINARY_NAME}"
-    print_success "✅ Client setup completed! (mode=client, remote_ip=${SERVER_IP})"
+    print_success "✅ Client setup completed! (mode=client, remote_ip=${SERVER_IP}, port=${SERVER_PORT})"
     
     echo ""
-    read -p "  ▶️ Run Stinger Client now? (y/N): " RUN_NOW
-    if [[ $RUN_NOW =~ ^[Yy]$ ]]; then ./"${BINARY_NAME}"; else print_info "Run it later with: ./stinger"; fi
+    start_stinger
 }
 
+# ============================================
+# Check Status Function
+# ============================================
 check_status() {
     echo ""; print_header "🔍 Checking Stinger Status..."
     echo "═══════════════════════════════════════════"
     
+    # 1. Check Process
     echo -e "\n${YELLOW}[1] Process Status:${NC}"
-    if pgrep -f "stinger.bin" > /dev/null || pgrep -x "stinger" > /dev/null; then
-        print_success "Stinger is RUNNING."
-        ps -eo pid,etime,cmd | grep -iE "stinger.bin|./stinger" | grep -v grep | awk '{print "  PID: " $1 " | Uptime: " $2}'
+    if [ -f "stinger.pid" ]; then
+        PID=$(cat stinger.pid)
+        if kill -0 "$PID" 2>/dev/null; then
+            print_success "Stinger is RUNNING (PID: $PID)."
+            ps -p "$PID" -o pid,etime,cmd | tail -n +2 | awk '{print "  PID: " $1 " | Uptime: " $2}'
+        else
+            print_error "Stinger is NOT RUNNING (stale PID file)."
+        fi
     else
-        print_error "Stinger is NOT RUNNING."
+        if pgrep -f "stinger.bin" > /dev/null || pgrep -x "stinger" > /dev/null; then
+            print_success "Stinger is RUNNING (found via pgrep)."
+            ps -eo pid,etime,cmd | grep -iE "stinger.bin|./stinger" | grep -v grep | awk '{print "  PID: " $1 " | Uptime: " $2}'
+        else
+            print_error "Stinger is NOT RUNNING."
+        fi
     fi
 
+    # 2. Check Tunnel Interfaces
     echo -e "\n${YELLOW}[2] Tunnel Interfaces (TUN/TAP):${NC}"
     if command -v ip &> /dev/null; then
         TUN_INTERFACES=$(ip link show | grep -iE "tun|tap|stinger|flagtun|utun" | awk -F: '{print $2}' | tr -d ' ')
@@ -144,6 +231,7 @@ check_status() {
         fi
     fi
 
+    # 3. Check Listening Ports
     echo -e "\n${YELLOW}[3] Network / Ports:${NC}"
     if command -v ss &> /dev/null; then
         PORTS=$(ss -tuln | grep -E ":8080|:51820|stinger")
@@ -154,29 +242,45 @@ check_status() {
             print_info "No tunnel ports listening on default 8080."
         fi
     fi
+
+    # 4. Check Logs
+    echo -e "\n${YELLOW}[4] Recent Logs:${NC}"
+    if [ -f "stinger.log" ]; then
+        tail -n 5 stinger.log | sed 's/^/  /'
+    else
+        print_info "No log file found."
+    fi
+
     echo -e "\n═══════════════════════════════════════════"
     read -p "Press Enter to return to menu..."
 }
 
+# ============================================
+# Main Menu Loop
+# ============================================
 while true; do
     clear
     echo "═══════════════════════════════════════════"
     echo "  🔓 Stinger Unlocked - Complete Installer"
     echo "═══════════════════════════════════════════"
     echo ""
-    print_menu "1. 🖥️  Install Server"
-    print_menu "2. 💻 Install Client"
+    print_menu "1. 🖥️  Install & Start Server (Auto)"
+    print_menu "2. 💻 Install & Start Client (Auto)"
     print_menu "3. 🔍 Check Status (Tunnel & Process)"
-    print_menu "4. 🗑️  Uninstall (Stop & Remove)"
-    print_menu "5. 🚪 Exit"
+    print_menu "4. 🛑 Stop Tunnel"
+    print_menu "5. 🗑️  Uninstall (Stop & Remove)"
+    print_menu "6. 🚪 Exit"
     echo ""
-    read -p "Select an option [1-5]: " CHOICE
+
+    read -p "Select an option [1-6]: " CHOICE
+
     case $CHOICE in
-        1) install_server ;;
-        2) install_client ;;
+        1) install_server; read -p "Press Enter to continue..." ;;
+        2) install_client; read -p "Press Enter to continue..." ;;
         3) check_status ;;
-        4) uninstall_stinger; read -p "Press Enter to continue..." ;;
-        5) print_info "Exiting..."; exit 0 ;;
+        4) stop_stinger; read -p "Press Enter to continue..." ;;
+        5) uninstall_stinger; read -p "Press Enter to continue..." ;;
+        6) print_info "Exiting..."; exit 0 ;;
         *) print_warning "Invalid option"; sleep 1 ;;
     esac
 done
