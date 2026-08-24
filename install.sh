@@ -19,13 +19,16 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# Functions
+# ============================================
+# ALL FUNCTIONS DEFINED HERE
+# ============================================
 print_status() { echo -e "${BLUE}[*]${NC} $1"; }
 print_success() { echo -e "${GREEN}[✓]${NC} $1"; }
 print_error() { echo -e "${RED}[✗]${NC} $1"; }
 print_warning() { echo -e "${YELLOW}[!]${NC} $1"; }
 print_info() { echo -e "${CYAN}[i]${NC} $1"; }
-print_header() { echo -e "${GREEN}▶${NC} $1"; }  # <-- THIS WAS MISSING
+print_header() { echo -e "${GREEN}▶${NC} $1"; }   # <-- DEFINED HERE
+print_menu() { echo -e "${BLUE}▸${NC} $1"; }
 
 clear
 echo "=========================================="
@@ -77,7 +80,6 @@ if file ${BINARY_NAME}.original | grep -q "shell script"; then
     
     cp ${BINARY_NAME}.original ${BINARY_NAME}
     
-    # Remove all restrictions
     print_status "Removing IP restrictions..."
     sed -i '/ifconfig.me/d' ${BINARY_NAME} 2>/dev/null || true
     sed -i '/curl.*ifconfig/d' ${BINARY_NAME} 2>/dev/null || true
@@ -100,17 +102,13 @@ if file ${BINARY_NAME}.original | grep -q "shell script"; then
 else
     print_info "File is binary - building wrapper..."
     
-    # Rename original binary
     mv ${BINARY_NAME}.original ${BINARY_NAME}.bin
     chmod +x ${BINARY_NAME}.bin
     
-    # Create wrapper script
     cat > ${BINARY_NAME} << 'EOF'
 #!/bin/bash
 # Stinger Wrapper - Unlocked Version
-# This wrapper bypasses all restrictions
 
-# Fake environment variables
 export FAKE_IP="192.168.1.100"
 export FAKE_HOSTNAME="ubuntu-server"
 export FAKE_OS="Ubuntu"
@@ -118,7 +116,6 @@ export ALLOWED_SERVER="true"
 export STINGER_IGNORE_CHECKS="1"
 export FAKE_LSB_RELEASE="Ubuntu"
 
-# Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BINARY_PATH="${SCRIPT_DIR}/stinger.bin"
 
@@ -184,12 +181,12 @@ echo ""
 echo "═══════════════════════════════════════════"
 echo ""
 
-read -p "Select an option [1-4]: " -r
+read -p "Select an option [1-4]: " USER_CHOICE
 echo ""
 
-case $REPLY in
+case $USER_CHOICE in
     1)
-        print_header "Running Stinger Unlocked..."
+        echo -e "${GREEN}▶ Running Stinger Unlocked...${NC}"
         echo "=========================================="
         ./${BINARY_NAME}
         ;;
