@@ -13,54 +13,111 @@ print_header() { echo -e "${GREEN}▶${NC} $1"; }
 print_menu() { echo -e "${BLUE}▸${NC} $1"; }
 print_info() { echo -e "${CYAN}[i]${NC} $1"; }
 
+# ============================================
+# Configuration
+# ============================================
+INSTALL_DIR="/opt/stinger"
 BINARY_NAME="stinger"
+SERVICE_NAME="stinger-tunnel"
 ORIGINAL_URL="https://github.com/lostsoul6/stinger-binary/raw/refs/heads/main/stinger"
-FORWARD_FILE="forwarded_ports.txt"
+FORWARD_FILE="${INSTALL_DIR}/forwarded_ports.txt"
+TUNNEL_SUBNET="10.0.0.0/24"
 
 # ============================================
-# Port Forwarding Functions
+# Enable IP Forwarding (CRITICAL for traffic)
+# ============================================
+enable_ip_forwarding() {
+    print_status "Enabling IP forwarding..."
+    
+    # Enable immediately
+    sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
+    
+    # Make persistent after reboot
+    if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf 2>/dev/null; then
+        echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+    fi
+    
+    # Also check sysctl.d
+    if [ -d /etc/sysctl.d ]; then
+        echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-stinger-forward.conf
+    fi
+    
+    sysctl -p > /dev/null 2>&1
+    print_success "IP forwarding enabled permanently"
+}
+
+# ============================================
+# Setup iptables rules for tunnel traffic
+# ============================================
+setup_tunnel_firewall() {
+    local MODE=$1
+    
+    print_status "Setting up firewall rules for tunnel traffic..."
+    
+    # Install required packages
+    if ! command -v iptables &> /dev/null; then
+        apt-get update -qq && apt-get install -y -qq iptables
+    fi
+    
+    if ! command -v netfilter-persistent &> /dev/null; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables-persistent > /dev/null 2>&1 || true
+    fi
+    
+    # Allow traffic on tunnel interfaces (tun0, tun1, flagtun0, etc.)
+    iptables -A INPUT -i tun+ -j ACCEPT 2>/dev/null || true
+    iptables -A OUTPUT -o tun+ -j ACCEPT 2>/dev/null || true
+    iptables -A INPUT -i flagtun+ -j ACCEPT 2>/dev/null || true
+    iptables -A OUTPUT -o flagtun+ -j ACCEPT 2>/dev/null || true
+    
+    # Allow FORWARD traffic through tunnel
+    iptables -A FORWARD -i tun+ -j ACCEPT 2>/dev/null || true
+    iptables -A FORWARD -o tun+ -j ACCEPT 2>/dev/null || true
+    iptables -A FORWARD -i flagtun+ -j ACCEPT 2>/dev/null || true
+    iptables -A FORWARD -o flagtun+ -j ACCEPT 2>/dev/null || true
+    
+    # Allow established connections
+    iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+    
+    # NAT/MASQUERADE for tunnel subnet
+    iptables -t nat -A POSTROUTING -s "$TUNNEL_SUBNET" -j MASQUERADE 2>/dev/null || true
+    
+    # Allow tunnel subnet traffic
+    iptables -A FORWARD -s "$TUNNEL_SUBNET" -j ACCEPT 2>/dev/null || true
+    iptables -A FORWARD -d "$TUNNEL_SUBNET" -j ACCEPT 2>/dev/null || true
+    
+    # Save rules
+    netfilter-persistent save > /dev/null 2>&1 || iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+    
+    print_success "Firewall rules applied and saved"
+}
+
+# ============================================
+# Port Forwarding (Server only)
 # ============================================
 setup_port_forwarding() {
     local MAIN_PORT=$1
     local FORWARD_PORTS=$2
     
     if [ -z "$FORWARD_PORTS" ]; then
-        print_info "No additional ports to forward."
         return 0
     fi
     
-    print_status "Setting up port forwarding rules..."
+    print_status "Setting up port forwarding..."
     
-    # Install iptables-persistent for saving rules
-    if ! command -v iptables-save &> /dev/null; then
-        print_warning "iptables-persistent not found, installing..."
-        sudo apt-get update -qq && sudo apt-get install -y -qq iptables-persistent
-    fi
-    
-    # Clear previous forwarding file
     > "$FORWARD_FILE"
-    
-    # Parse comma-separated ports
     IFS=',' read -ra PORT_ARRAY <<< "$FORWARD_PORTS"
     
     for PORT in "${PORT_ARRAY[@]}"; do
         PORT=$(echo "$PORT" | tr -d ' ')
         if [[ "$PORT" =~ ^[0-9]+$ ]]; then
-            # Remove existing rule if any (to avoid duplicates)
-            sudo iptables -t nat -D PREROUTING -p tcp --dport "$PORT" -j REDIRECT --to-port "$MAIN_PORT" 2>/dev/null || true
-            
-            # Add new rule
-            sudo iptables -t nat -A PREROUTING -p tcp --dport "$PORT" -j REDIRECT --to-port "$MAIN_PORT"
+            iptables -t nat -D PREROUTING -p tcp --dport "$PORT" -j REDIRECT --to-port "$MAIN_PORT" 2>/dev/null || true
+            iptables -t nat -A PREROUTING -p tcp --dport "$PORT" -j REDIRECT --to-port "$MAIN_PORT"
             echo "$PORT" >> "$FORWARD_FILE"
-            print_success "Forwarding port $PORT -> $MAIN_PORT"
-        else
-            print_warning "Invalid port skipped: $PORT"
+            print_success "Port $PORT -> $MAIN_PORT"
         fi
     done
     
-    # Save iptables rules for persistence
-    sudo netfilter-persistent save 2>/dev/null || sudo iptables-save > /tmp/iptables.rules 2>/dev/null || true
-    print_success "Port forwarding rules saved and applied!"
+    netfilter-persistent save > /dev/null 2>&1 || true
 }
 
 remove_port_forwarding() {
@@ -69,108 +126,111 @@ remove_port_forwarding() {
     fi
     
     print_status "Removing port forwarding rules..."
-    
     while IFS= read -r PORT; do
         if [[ "$PORT" =~ ^[0-9]+$ ]]; then
-            sudo iptables -t nat -D PREROUTING -p tcp --dport "$PORT" -j REDIRECT 2>/dev/null || true
-            sudo iptables -t nat -D PREROUTING -p tcp --dport "$PORT" -j REDIRECT --to-port 8080 2>/dev/null || true
-            print_success "Removed forwarding for port $PORT"
+            iptables -t nat -D PREROUTING -p tcp --dport "$PORT" -j REDIRECT 2>/dev/null || true
+            iptables -t nat -D PREROUTING -p tcp --dport "$PORT" -j REDIRECT --to-port 8080 2>/dev/null || true
         fi
     done < "$FORWARD_FILE"
     
     rm -f "$FORWARD_FILE"
-    sudo netfilter-persistent save 2>/dev/null || true
-    print_success "All port forwarding rules removed!"
+    netfilter-persistent save > /dev/null 2>&1 || true
+    print_success "Port forwarding removed"
 }
 
 # ============================================
-# Start Stinger in Background (Automatic)
+# Create Systemd Service (Survives Reboot)
 # ============================================
-start_stinger() {
-    pkill -f "stinger.bin" 2>/dev/null || true
-    pkill -x "stinger" 2>/dev/null || true
-    sleep 1
+create_systemd_service() {
+    print_status "Creating systemd service for auto-start..."
     
-    print_status "Starting Stinger in background..."
-    nohup ./"${BINARY_NAME}" > stinger.log 2>&1 &
-    STINGER_PID=$!
-    echo "$STINGER_PID" > stinger.pid
-    
+    cat > "/etc/systemd/system/${SERVICE_NAME}.service" << EOF
+[Unit]
+Description=Stinger Tunnel Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=${INSTALL_DIR}
+ExecStart=${INSTALL_DIR}/${BINARY_NAME}
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable "${SERVICE_NAME}" > /dev/null 2>&1
+    print_success "Systemd service created and enabled (auto-start on boot)"
+}
+
+# ============================================
+# Start/Stop Service
+# ============================================
+start_service() {
+    print_status "Starting Stinger service..."
+    systemctl restart "${SERVICE_NAME}"
     sleep 3
     
-    if kill -0 "$STINGER_PID" 2>/dev/null; then
-        print_success "Stinger started successfully in background! (PID: $STINGER_PID)"
-        print_info "Logs are being saved to: stinger.log"
-        echo ""
-        print_header "📋 Last 5 lines of log:"
-        tail -n 5 stinger.log | sed 's/^/  /'
+    if systemctl is-active --quiet "${SERVICE_NAME}"; then
+        print_success "Stinger is RUNNING (systemd managed)"
+        print_info "Check logs: journalctl -u ${SERVICE_NAME} -f"
     else
-        print_error "Failed to start Stinger. Check stinger.log for details."
-        echo ""
-        print_header "📋 Error log:"
-        cat stinger.log | sed 's/^/  /'
-        rm -f stinger.pid
+        print_error "Failed to start service. Checking logs..."
+        journalctl -u "${SERVICE_NAME}" -n 10 --no-pager
     fi
 }
 
-# ============================================
-# Stop Stinger
-# ============================================
-stop_stinger() {
-    echo ""
-    print_header "🛑 Stopping Stinger..."
-    
-    # Remove port forwarding rules
-    remove_port_forwarding
-    
-    if [ -f "stinger.pid" ]; then
-        PID=$(cat stinger.pid)
-        if kill -0 "$PID" 2>/dev/null; then
-            kill "$PID"
-            print_success "Stinger stopped (PID: $PID)."
-            rm -f stinger.pid
-        else
-            print_warning "Process not running. Cleaning up PID file."
-            rm -f stinger.pid
-        fi
-    else
-        pkill -f "stinger.bin" 2>/dev/null || true
-        pkill -x "stinger" 2>/dev/null || true
-        print_success "Stinger processes killed."
-    fi
+stop_service() {
+    print_status "Stopping Stinger service..."
+    systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
+    pkill -f "stinger.bin" 2>/dev/null || true
+    pkill -x "stinger" 2>/dev/null || true
+    print_success "Stinger stopped"
 }
 
 # ============================================
-# Uninstall Function
+# Uninstall
 # ============================================
 uninstall_stinger() {
     echo ""
     print_header "🗑️  Uninstalling Stinger..."
-    stop_stinger
-    [ -f "stinger" ] && rm -f "stinger" && print_success "Removed: stinger"
-    [ -f "stinger.bin" ] && rm -f "stinger.bin" && print_success "Removed: stinger.bin"
-    [ -f "stinger.original" ] && rm -f "stinger.original" && print_success "Removed: stinger.original"
-    [ -f "config.toml" ] && rm -f "config.toml" && print_success "Removed: config.toml"
-    [ -f "stinger.log" ] && rm -f "stinger.log" && print_success "Removed: stinger.log"
-    [ -f "stinger.pid" ] && rm -f "stinger.pid" && print_success "Removed: stinger.pid"
-    [ -f "$FORWARD_FILE" ] && rm -f "$FORWARD_FILE" && print_success "Removed: $FORWARD_FILE"
-    echo ""; print_success "✅ Uninstall completed! All files and processes removed."
+    
+    stop_service
+    remove_port_forwarding
+    
+    systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
+    rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+    systemctl daemon-reload
+    
+    rm -rf "$INSTALL_DIR"
+    
+    print_success "✅ Uninstall completed! All files, services, and rules removed."
 }
 
 # ============================================
-# Install & Start Server Function (With Port Forwarding)
+# Install Server
 # ============================================
 install_server() {
-    echo ""; print_header "🖥️  Installing & Starting Stinger Server..."
+    echo ""; print_header "🖥️  Installing Stinger SERVER..."
     
+    # Install dependencies
     if ! command -v wget &> /dev/null; then
-        print_warning "wget not found, installing..."
-        sudo apt-get update -qq && sudo apt-get install -y -qq wget file
+        apt-get update -qq && apt-get install -y -qq wget file
     fi
     
+    # Create install directory
+    mkdir -p "$INSTALL_DIR"
+    cd "$INSTALL_DIR"
+    
+    # Download binary
     print_status "Downloading stinger binary..."
     wget -q --show-progress -O "${BINARY_NAME}.original" "$ORIGINAL_URL" || { print_error "Download failed!"; return 1; }
     
+    # Remove restrictions
     print_status "Removing restrictions..."
     if file "${BINARY_NAME}.original" | grep -q "shell script"; then
         cp "${BINARY_NAME}.original" "${BINARY_NAME}"
@@ -180,34 +240,34 @@ install_server() {
         chmod +x "${BINARY_NAME}.bin"
         cat > "${BINARY_NAME}" << 'WRAPPER'
 #!/bin/bash
-export FAKE_IP="192.168.1.100"; export FAKE_HOSTNAME="ubuntu-server"; export ALLOWED_SERVER="true"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; BINARY_PATH="${SCRIPT_DIR}/stinger.bin"
-[ -f "$BINARY_PATH" ] && exec "$BINARY_PATH" "$@" || echo "[✗] stinger.bin not found!"
+export FAKE_IP="192.168.1.100"
+export FAKE_HOSTNAME="ubuntu-server"
+export ALLOWED_SERVER="true"
+export STINGER_IGNORE_CHECKS="1"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BINARY_PATH="${SCRIPT_DIR}/stinger.bin"
+[ -f "$BINARY_PATH" ] && exec "$BINARY_PATH" "$@" || { echo "[✗] stinger.bin not found!"; exit 1; }
 WRAPPER
     fi
     
+    # Get configuration
     echo ""
-    read -p "  🌐 Enter Remote IP (Client IP or 0.0.0.0 for any) [0.0.0.0]: " REMOTE_IP < /dev/tty
+    read -p "  🌐 Remote IP (0.0.0.0 = any client) [0.0.0.0]: " REMOTE_IP < /dev/tty
     REMOTE_IP=${REMOTE_IP:-0.0.0.0}
     
-    read -p "  🔗 Enter Main Tunnel Port (Stinger will listen on this) [8080]: " MAIN_PORT < /dev/tty
+    read -p "  🔗 Main Tunnel Port [8080]: " MAIN_PORT < /dev/tty
     MAIN_PORT=${MAIN_PORT:-8080}
     
-    read -p "  🛜  Enter Local Tunnel IP (Server Virtual IP) [10.0.0.1/24]: " LOCAL_TUN < /dev/tty
+    read -p "  🛜  Tunnel Virtual IP [10.0.0.1/24]: " LOCAL_TUN < /dev/tty
     LOCAL_TUN=${LOCAL_TUN:-10.0.0.1/24}
     
     echo ""
-    print_info "💡 You can forward additional ports to the main tunnel port."
-    print_info "   Example: 443,2053,8443 (leave empty to skip)"
-    read -p "  🔀 Enter additional ports to forward (comma-separated): " FORWARD_PORTS < /dev/tty
+    print_info "💡 Forward additional ports to main tunnel port (optional)"
+    read -p "  🔀 Extra ports (e.g. 443,2053,80) or press Enter to skip: " FORWARD_PORTS < /dev/tty
     
-    print_status "Creating SERVER configuration..."
+    # Create config
+    print_status "Creating server configuration..."
     cat > config.toml << EOF
-mode = "server"
-remote_ip = "${REMOTE_IP}"
-local_tun = "${LOCAL_TUN}"
-
-[general]
 mode = "server"
 remote_ip = "${REMOTE_IP}"
 local_tun = "${LOCAL_TUN}"
@@ -220,35 +280,54 @@ local_tun = "${LOCAL_TUN}"
 EOF
     
     chmod +x "${BINARY_NAME}"
-    print_success "✅ Server setup completed! (mode=server, port=${MAIN_PORT}, local_tun=${LOCAL_TUN})"
     
-    # Setup port forwarding if additional ports were provided
+    # Enable networking
+    enable_ip_forwarding
+    setup_tunnel_firewall "server"
+    
+    # Port forwarding
     if [ -n "$FORWARD_PORTS" ]; then
         setup_port_forwarding "$MAIN_PORT" "$FORWARD_PORTS"
-        echo ""
-        print_success "🔀 Port forwarding active:"
-        echo "     Main tunnel port: $MAIN_PORT"
-        echo "     Forwarded ports: $FORWARD_PORTS -> $MAIN_PORT"
     fi
     
+    # Create systemd service
+    create_systemd_service
+    
+    # Start service
+    start_service
+    
     echo ""
-    start_stinger
+    print_success "═══════════════════════════════════════════"
+    print_success "✅ SERVER INSTALLED SUCCESSFULLY!"
+    print_success "═══════════════════════════════════════════"
+    print_info "  Main Port: $MAIN_PORT"
+    print_info "  Tunnel IP: $LOCAL_TUN"
+    [ -n "$FORWARD_PORTS" ] && print_info "  Forwarded: $FORWARD_PORTS -> $MAIN_PORT"
+    print_info "  Service: systemctl status ${SERVICE_NAME}"
+    print_info "  Logs: journalctl -u ${SERVICE_NAME} -f"
+    print_success "═══════════════════════════════════════════"
 }
 
 # ============================================
-# Install & Start Client Function
+# Install Client
 # ============================================
 install_client() {
-    echo ""; print_header "💻 Installing & Starting Stinger Client..."
+    echo ""; print_header "💻 Installing Stinger CLIENT..."
     
+    # Install dependencies
     if ! command -v wget &> /dev/null; then
-        print_warning "wget not found, installing..."
-        sudo apt-get update -qq && sudo apt-get install -y -qq wget file
+        apt-get update -qq && apt-get install -y -qq wget file
     fi
     
+    # Create install directory
+    mkdir -p "$INSTALL_DIR"
+    cd "$INSTALL_DIR"
+    
+    # Download binary
     print_status "Downloading stinger binary..."
     wget -q --show-progress -O "${BINARY_NAME}.original" "$ORIGINAL_URL" || { print_error "Download failed!"; return 1; }
     
+    # Remove restrictions
     print_status "Removing restrictions..."
     if file "${BINARY_NAME}.original" | grep -q "shell script"; then
         cp "${BINARY_NAME}.original" "${BINARY_NAME}"
@@ -258,27 +337,33 @@ install_client() {
         chmod +x "${BINARY_NAME}.bin"
         cat > "${BINARY_NAME}" << 'WRAPPER'
 #!/bin/bash
-export FAKE_IP="192.168.1.100"; export FAKE_HOSTNAME="ubuntu-client"; export ALLOWED_SERVER="true"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; BINARY_PATH="${SCRIPT_DIR}/stinger.bin"
-[ -f "$BINARY_PATH" ] && exec "$BINARY_PATH" "$@" || echo "[✗] stinger.bin not found!"
+export FAKE_IP="192.168.1.100"
+export FAKE_HOSTNAME="ubuntu-client"
+export ALLOWED_SERVER="true"
+export STINGER_IGNORE_CHECKS="1"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BINARY_PATH="${SCRIPT_DIR}/stinger.bin"
+[ -f "$BINARY_PATH" ] && exec "$BINARY_PATH" "$@" || { echo "[✗] stinger.bin not found!"; exit 1; }
 WRAPPER
     fi
     
+    # Get configuration
     echo ""
-    read -p "  🌐 Enter Server IP (remote_ip) [127.0.0.1]: " SERVER_IP < /dev/tty
-    SERVER_IP=${SERVER_IP:-127.0.0.1}
-    read -p "  🔗 Enter Server Port (Use ONE port, e.g. 443) [8080]: " SERVER_PORT < /dev/tty
+    read -p "  🌐 Server IP: " SERVER_IP < /dev/tty
+    if [ -z "$SERVER_IP" ]; then
+        print_error "Server IP is required!"
+        return 1
+    fi
+    
+    read -p "  🔗 Server Port (ONE port only, e.g. 443) [8080]: " SERVER_PORT < /dev/tty
     SERVER_PORT=${SERVER_PORT:-8080}
-    read -p "  🛜  Enter Local Tunnel IP (Client Virtual IP) [10.0.0.2/24]: " LOCAL_TUN < /dev/tty
+    
+    read -p "  🛜  Client Tunnel IP [10.0.0.2/24]: " LOCAL_TUN < /dev/tty
     LOCAL_TUN=${LOCAL_TUN:-10.0.0.2/24}
     
-    print_status "Creating CLIENT configuration..."
+    # Create config
+    print_status "Creating client configuration..."
     cat > config.toml << EOF
-mode = "client"
-remote_ip = "${SERVER_IP}"
-local_tun = "${LOCAL_TUN}"
-
-[general]
 mode = "client"
 remote_ip = "${SERVER_IP}"
 local_tun = "${LOCAL_TUN}"
@@ -291,110 +376,150 @@ local_tun = "${LOCAL_TUN}"
 EOF
     
     chmod +x "${BINARY_NAME}"
-    print_success "✅ Client setup completed! (mode=client, remote_ip=${SERVER_IP}, port=${SERVER_PORT}, local_tun=${LOCAL_TUN})"
+    
+    # Enable networking
+    enable_ip_forwarding
+    setup_tunnel_firewall "client"
+    
+    # Create systemd service
+    create_systemd_service
+    
+    # Start service
+    start_service
     
     echo ""
-    start_stinger
+    print_success "═══════════════════════════════════════════"
+    print_success "✅ CLIENT INSTALLED SUCCESSFULLY!"
+    print_success "═══════════════════════════════════════════"
+    print_info "  Server: $SERVER_IP:$SERVER_PORT"
+    print_info "  Tunnel IP: $LOCAL_TUN"
+    print_info "  Service: systemctl status ${SERVICE_NAME}"
+    print_info "  Logs: journalctl -u ${SERVICE_NAME} -f"
+    print_success "═══════════════════════════════════════════"
 }
 
 # ============================================
-# Check Status Function
+# Check Status
 # ============================================
 check_status() {
-    echo ""; print_header "🔍 Checking Stinger Status..."
+    echo ""; print_header "🔍 Stinger Status Report"
     echo "═══════════════════════════════════════════"
     
-    echo -e "\n${YELLOW}[1] Process Status:${NC}"
-    if [ -f "stinger.pid" ]; then
-        PID=$(cat stinger.pid)
-        if kill -0 "$PID" 2>/dev/null; then
-            print_success "Stinger is RUNNING (PID: $PID)."
-            ps -p "$PID" -o pid,etime,cmd | tail -n +2 | awk '{print "  PID: " $1 " | Uptime: " $2}'
-        else
-            print_error "Stinger is NOT RUNNING (stale PID file). Cleaning up..."
-            rm -f stinger.pid
-        fi
+    # Service status
+    echo -e "\n${YELLOW}[1] Service Status:${NC}"
+    if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        print_success "Stinger service is ACTIVE and RUNNING"
+        systemctl status "${SERVICE_NAME}" --no-pager -l | head -10
     else
-        if pgrep -f "stinger.bin" > /dev/null || pgrep -x "stinger" > /dev/null; then
-            print_success "Stinger is RUNNING (found via pgrep)."
-            ps -eo pid,etime,cmd | grep -iE "stinger.bin|./stinger" | grep -v grep | awk '{print "  PID: " $1 " | Uptime: " $2}'
-        else
-            print_error "Stinger is NOT RUNNING."
-        fi
+        print_error "Stinger service is NOT RUNNING"
     fi
-
-    echo -e "\n${YELLOW}[2] Tunnel Interfaces (TUN/TAP):${NC}"
-    if command -v ip &> /dev/null; then
-        TUN_INTERFACES=$(ip link show | grep -iE "tun|tap|stinger|flagtun|utun" | awk -F: '{print $2}' | tr -d ' ')
-        if [ -n "$TUN_INTERFACES" ]; then
-            print_success "Active tunnel interface(s) found:"
-            for iface in $TUN_INTERFACES; do
-                echo -e "  ${CYAN}▸${NC} $iface"
-                ip addr show $iface 2>/dev/null | grep "inet " | awk '{print "    IPv4: " $2}'
-            done
-        else
-            print_warning "No active TUN/TAP tunnel interfaces found."
-        fi
+    
+    # IP Forwarding
+    echo -e "\n${YELLOW}[2] IP Forwarding:${NC}"
+    if [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" = "1" ]; then
+        print_success "IP forwarding is ENABLED"
+    else
+        print_error "IP forwarding is DISABLED (traffic won't pass!)"
     fi
-
-    echo -e "\n${YELLOW}[3] Network / Ports:${NC}"
-    if command -v ss &> /dev/null; then
-        PORTS=$(ss -tuln | grep -E ":8080|:51820|stinger")
-        if [ -n "$PORTS" ]; then
-            print_success "Relevant listening ports:"
-            echo "$PORTS" | awk '{print "  " $1 " " $5}'
-        else
-            print_info "No tunnel ports listening on default 8080."
-        fi
+    
+    # Tunnel interfaces
+    echo -e "\n${YELLOW}[3] Tunnel Interfaces:${NC}"
+    TUN_IFACES=$(ip link show 2>/dev/null | grep -iE "tun|tap|flagtun" | awk -F: '{print $2}' | tr -d ' ')
+    if [ -n "$TUN_IFACES" ]; then
+        print_success "Tunnel interface(s) found:"
+        for iface in $TUN_IFACES; do
+            echo -e "  ${CYAN}▸${NC} $iface"
+            ip addr show "$iface" 2>/dev/null | grep "inet " | awk '{print "    IPv4: " $2}'
+        done
+    else
+        print_warning "No tunnel interfaces found"
     fi
-
-    echo -e "\n${YELLOW}[4] Port Forwarding Rules:${NC}"
+    
+    # iptables rules
+    echo -e "\n${YELLOW}[4] Firewall Rules:${NC}"
+    FORWARD_RULES=$(iptables -L FORWARD -n 2>/dev/null | grep -c "ACCEPT" || echo "0")
+    NAT_RULES=$(iptables -t nat -L PREROUTING -n 2>/dev/null | grep -c "REDIRECT" || echo "0")
+    echo -e "  FORWARD ACCEPT rules: ${GREEN}${FORWARD_RULES}${NC}"
+    echo -e "  NAT REDIRECT rules: ${GREEN}${NAT_RULES}${NC}"
+    
+    # Port forwarding
+    echo -e "\n${YELLOW}[5] Port Forwarding:${NC}"
     if [ -f "$FORWARD_FILE" ]; then
-        print_success "Active port forwarding rules:"
         while IFS= read -r PORT; do
-            echo -e "  ${CYAN}▸${NC} Port $PORT -> Main tunnel port"
+            echo -e "  ${CYAN}▸${NC} Port $PORT -> Main tunnel"
         done < "$FORWARD_FILE"
     else
-        print_info "No port forwarding rules configured."
+        print_info "No port forwarding configured"
     fi
-
-    echo -e "\n${YELLOW}[5] Recent Logs:${NC}"
-    if [ -f "stinger.log" ]; then
-        tail -n 5 stinger.log | sed 's/^/  /'
-    else
-        print_info "No log file found."
-    fi
-
+    
+    # Recent logs
+    echo -e "\n${YELLOW}[6] Recent Logs:${NC}"
+    journalctl -u "${SERVICE_NAME}" -n 5 --no-pager 2>/dev/null | sed 's/^/  /' || print_info "No logs available"
+    
     echo -e "\n═══════════════════════════════════════════"
     read -p "Press Enter to return to menu..." < /dev/tty
 }
 
 # ============================================
-# Main Menu Loop
+# Test Connectivity
+# ============================================
+test_connection() {
+    echo ""; print_header "🧪 Testing Tunnel Connectivity..."
+    
+    read -p "  🎯 Enter target tunnel IP to ping (e.g. 10.0.0.1): " TARGET_IP < /dev/tty
+    
+    if [ -z "$TARGET_IP" ]; then
+        print_warning "No IP provided"
+        return
+    fi
+    
+    print_status "Pinging $TARGET_IP..."
+    if ping -c 4 -W 3 "$TARGET_IP"; then
+        echo ""
+        print_success "✅ CONNECTION SUCCESSFUL! Tunnel is working."
+    else
+        echo ""
+        print_error "❌ CONNECTION FAILED! Check the following:"
+        echo "  1. Is Stinger running on both server and client?"
+        echo "  2. Is the server port open in firewall?"
+        echo "  3. Are tunnel IPs in the same subnet?"
+        echo "  4. Check logs: journalctl -u ${SERVICE_NAME} -f"
+    fi
+    
+    read -p "Press Enter to return to menu..." < /dev/tty
+}
+
+# ============================================
+# Main Menu
 # ============================================
 while true; do
     clear
     echo "═══════════════════════════════════════════"
-    echo "  🔓 Stinger Unlocked - Complete Installer"
+    echo "  🔓 Stinger Unlocked - Final Edition"
+    echo "     Auto-Start | Port Forward | Traffic Fix"
     echo "═══════════════════════════════════════════"
     echo ""
-    print_menu "1. 🖥️  Install & Start Server (Auto + Port Forwarding)"
-    print_menu "2. 💻 Install & Start Client (Auto)"
-    print_menu "3. 🔍 Check Status (Tunnel & Process)"
-    print_menu "4. 🛑 Stop Tunnel"
-    print_menu "5. 🗑️  Uninstall (Stop & Remove)"
-    print_menu "6. 🚪 Exit"
+    print_menu "1. 🖥️  Install & Start SERVER"
+    print_menu "2. 💻 Install & Start CLIENT"
+    print_menu "3. 🔍 Check Status & Diagnostics"
+    print_menu "4. 🧪 Test Connection (Ping)"
+    print_menu "5. 🔄 Restart Tunnel"
+    print_menu "6. 🛑 Stop Tunnel"
+    print_menu "7. 🗑️  Uninstall Everything"
+    print_menu "8. 🚪 Exit"
     echo ""
 
-    read -p "Select an option [1-6]: " CHOICE < /dev/tty
+    read -p "Select an option [1-8]: " CHOICE < /dev/tty
 
     case $CHOICE in
         1) install_server; read -p "Press Enter to continue..." < /dev/tty ;;
         2) install_client; read -p "Press Enter to continue..." < /dev/tty ;;
         3) check_status ;;
-        4) stop_stinger; read -p "Press Enter to continue..." < /dev/tty ;;
-        5) uninstall_stinger; read -p "Press Enter to continue..." < /dev/tty ;;
-        6) print_info "Exiting..."; exit 0 ;;
+        4) test_connection ;;
+        5) systemctl restart "${SERVICE_NAME}"; print_success "Tunnel restarted!"; sleep 2 ;;
+        6) stop_service; read -p "Press Enter to continue..." < /dev/tty ;;
+        7) uninstall_stinger; read -p "Press Enter to continue..." < /dev/tty ;;
+        8) print_info "Exiting..."; exit 0 ;;
         *) print_warning "Invalid option"; sleep 1 ;;
     esac
 done
