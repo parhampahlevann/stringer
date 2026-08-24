@@ -130,29 +130,28 @@ if file ${BINARY_NAME}.original | grep -q "shell script"; then
 else
     print_status "File is binary - building wrapper..."
     
-    cat > ${BINARY_NAME} << 'WRAPPER_EOF'
-#!/bin/bash
-# Stinger - Unlocked Version (Wrapper)
-
-export FAKE_IP="192.168.1.100"
-export FAKE_HOSTNAME="ubuntu-server"
-export FAKE_OS="Ubuntu"
-export ALLOWED_SERVER="true"
-export STINGER_IGNORE_CHECKS="1"
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BINARY_PATH="${SCRIPT_DIR}/stinger.bin"
-
-if [ -f "$BINARY_PATH" ]; then
-    chmod +x "$BINARY_PATH"
-    echo "[✓] Running Stinger Unlocked..."
-    exec "$BINARY_PATH" "$@"
-else
-    echo "[✗] Original binary not found!"
-    echo "[!] Please make sure stinger.bin is in the current directory."
-    exit 1
-fi
-WRAPPER_EOF
+    # Create wrapper file using printf to avoid heredoc issues
+    printf '#!/bin/bash\n' > ${BINARY_NAME}
+    printf '# Stinger - Unlocked Version (Wrapper)\n' >> ${BINARY_NAME}
+    printf '\n' >> ${BINARY_NAME}
+    printf 'export FAKE_IP="192.168.1.100"\n' >> ${BINARY_NAME}
+    printf 'export FAKE_HOSTNAME="ubuntu-server"\n' >> ${BINARY_NAME}
+    printf 'export FAKE_OS="Ubuntu"\n' >> ${BINARY_NAME}
+    printf 'export ALLOWED_SERVER="true"\n' >> ${BINARY_NAME}
+    printf 'export STINGER_IGNORE_CHECKS="1"\n' >> ${BINARY_NAME}
+    printf '\n' >> ${BINARY_NAME}
+    printf 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n' >> ${BINARY_NAME}
+    printf 'BINARY_PATH="${SCRIPT_DIR}/stinger.bin"\n' >> ${BINARY_NAME}
+    printf '\n' >> ${BINARY_NAME}
+    printf 'if [ -f "$BINARY_PATH" ]; then\n' >> ${BINARY_NAME}
+    printf '    chmod +x "$BINARY_PATH"\n' >> ${BINARY_NAME}
+    printf '    echo "[✓] Running Stinger Unlocked..."\n' >> ${BINARY_NAME}
+    printf '    exec "$BINARY_PATH" "$@"\n' >> ${BINARY_NAME}
+    printf 'else\n' >> ${BINARY_NAME}
+    printf '    echo "[✗] Original binary not found!"\n' >> ${BINARY_NAME}
+    printf '    echo "[!] Please make sure stinger.bin is in the current directory."\n' >> ${BINARY_NAME}
+    printf '    exit 1\n' >> ${BINARY_NAME}
+    printf 'fi\n' >> ${BINARY_NAME}
 
     mv ${BINARY_NAME}.original ${BINARY_NAME}.bin
     print_success "Wrapper created and original binary renamed to stinger.bin"
@@ -200,22 +199,93 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     
     cd temp-repo 2>/dev/null || exit
     
-    cat > README.md << 'README_EOF'
-# Stinger Unlocked
+    # Create README.md using printf
+    printf '# Stinger Unlocked\n' > README.md
+    printf '\n' >> README.md
+    printf 'Unlocked version of Stinger that works on ALL servers.\n' >> README.md
+    printf '\n' >> README.md
+    printf '## Features\n' >> README.md
+    printf '\n' >> README.md
+    printf '- Removed IP restrictions\n' >> README.md
+    printf '- Removed OS restrictions\n' >> README.md
+    printf '- Removed server whitelist\n' >> README.md
+    printf '- One-click auto installation\n' >> README.md
+    printf '- Runs on all Ubuntu servers\n' >> README.md
+    printf '\n' >> README.md
+    printf '## Installation\n' >> README.md
+    printf '\n' >> README.md
+    printf '```bash\n' >> README.md
+    printf 'wget -O stinger https://raw.githubusercontent.com/parhampahlevann/stringer/main/stinger\n' >> README.md
+    printf 'chmod +x stinger\n' >> README.md
+    printf './stinger\n' >> README.md
+    printf '```\n' >> README.md
+    printf '\n' >> README.md
+    printf '## One-liner Installation\n' >> README.md
+    printf '\n' >> README.md
+    printf '```bash\n' >> README.md
+    printf 'bash <(curl -s https://raw.githubusercontent.com/parhampahlevann/stringer/main/install.sh)\n' >> README.md
+    printf '```\n' >> README.md
+    printf '\n' >> README.md
+    printf '## Notice\n' >> README.md
+    printf '\n' >> README.md
+    printf 'This version is for educational and testing purposes only.\n' >> README.md
+    printf 'Use of this tool is at your own risk.\n' >> README.md
+    printf '\n' >> README.md
+    printf '## License\n' >> README.md
+    printf '\n' >> README.md
+    printf 'MIT License\n' >> README.md
+    printf '\n' >> README.md
+    printf '---\n' >> README.md
+    printf 'Made with by parhampahlevann\n' >> README.md
+    
+    # Create .gitignore
+    printf '*.original\n' > .gitignore
+    printf '*.bin\n' >> .gitignore
+    printf 'temp-*\n' >> .gitignore
+    printf '*.tmp\n' >> .gitignore
+    printf '.DS_Store\n' >> .gitignore
+    
+    print_status "Pushing changes to GitHub..."
+    git add .
+    git commit -m "Unlocked version - $(date +'%Y-%m-%d %H:%M:%S')" 2>/dev/null || print_warning "No changes to commit"
+    git push origin main 2>/dev/null || git push origin master 2>/dev/null
+    
+    cd ..
+    rm -rf temp-repo 2>/dev/null
+    
+    print_success "Upload completed successfully!"
+    echo ""
+    echo "Download Links:"
+    echo "  - https://raw.githubusercontent.com/${GITHUB_USERNAME}/${REPO_NAME}/main/${BINARY_NAME}"
+    echo "  - https://github.com/${GITHUB_USERNAME}/${REPO_NAME}"
+fi
 
-Unlocked version of Stinger that works on ALL servers.
+# ============================================
+# Step 7: Run (Optional)
+# ============================================
+echo ""
+print_success "Installation completed!"
 
-## Features
+if [[ -f "${BINARY_NAME}" ]]; then
+    print_status "Unlocked version is ready at ${BINARY_NAME}"
+    echo ""
+    read -p "Do you want to run Stinger now? (y/N): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo ""
+        print_status "Running Stinger Unlocked..."
+        echo "=========================================="
+        ./${BINARY_NAME}
+    else
+        echo ""
+        print_status "You can run it later with:"
+        echo "  ./${BINARY_NAME}"
+    fi
+else
+    print_error "${BINARY_NAME} not found!"
+fi
 
-- Removed IP restrictions
-- Removed OS restrictions
-- Removed server whitelist
-- One-click auto installation
-- Runs on all Ubuntu servers
-
-## Installation
-
-```bash
-wget -O stinger https://raw.githubusercontent.com/parhampahlevann/stringer/main/stinger
-chmod +x stinger
-./stinger
+echo ""
+echo "=========================================="
+print_success "Installation process finished"
+echo "=========================================="
