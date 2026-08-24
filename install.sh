@@ -1,16 +1,18 @@
 #!/bin/bash
 # ============================================================================
-# Stinger Tunnel - Fixed Edition v5
+# Stinger Tunnel - Fixed Edition v6  (ICMP-only build)
 # Server=IRAN | Client=FOREIGN
 #
-# FIXES vs v4:
-#  1) transport=tcp  (ICMP transport is dropped by Iranian ISPs -> data dead)
-#  2) tun-setup.sh never exits non-zero -> systemd unit survives boot races
-#  3) MTU aligned to stinger inner MTU (1320) + MSS clamp rule added
-#  4) iptables-persistent installed+enabled reliably -> rules survive reboot
-#  5) Full-tunnel default route restored automatically after reboot
-#  6) Port redirection also opens INPUT ACCEPT (was missing -> forward dead)
-#  7) All iptables ops are delete-then-add -> no duplicate rules
+# v6 changes:
+#  * Removes the transport prompt entirely - this stinger binary is ICMP-only
+#    (config error: transport must be 'icmp'). A guard auto-removes any bad
+#    transport line so the service can never die from it again.
+#  * New menu item: "ICMP Size Test & MTU Auto-tune" - finds the largest ICMP
+#    payload the ISP passes between the two public IPs and lowers the tunnel
+#    MTU accordingly (fixes "health OK but data dead" when ISP drops big ICMP).
+#  * All v5 fixes kept: MSS clamp, MTU 1320, iptables persistence, tun-setup.sh
+#    never kills the unit, full-tunnel restored on boot, port redirect opens
+#    INPUT, delete-then-add (no duplicate rules).
 # ============================================================================
 set -e
 
@@ -30,14 +32,23 @@ ORIGINAL_URL="https://github.com/lostsoul6/stinger-binary/raw/refs/heads/main/st
 FORWARD_FILE="${INSTALL_DIR}/forwarded_ports.txt"
 TUNNEL_SUBNET="10.0.0.0/24"
 FULL_TUNNEL_FLAG="${INSTALL_DIR}/.full_tunnel_enabled"
-TUN_MTU=1320   # FIX: match stinger inner MTU (was 1280 -> mismatch drops packets)
+TUN_MTU=1320   # stinger inner MTU; lower automatically by the ICMP size test
 
 detect_main_iface() {
     ip route show default 2>/dev/null | awk '/default/ {print $5; exit}' || echo "eth0"
 }
 MAIN_IFACE=$(detect_main_iface)
 
-# Loop-delete until no match remains
+# FIX: this binary ONLY accepts icmp; silently remove any bad transport line
+fix_transport_config() {
+    if grep -q '^transport *=' "${INSTALL_DIR}/config.toml" 2>/dev/null; then
+        if ! grep -q '^transport *="icmp"' "${INSTALL_DIR}/config.toml" 2>/dev/null; then
+            print_warning "Removing invalid transport line (this build is ICMP-only)"
+            sed -i '/^transport *=/d' "${INSTALL_DIR}/config.toml"
+        fi
+    fi
+}
+
 del_rule() {
     local table="$1" chain="$2" spec="$3"
     while iptables -t "$table" -C "$chain" $spec 2>/dev/null; do
@@ -53,12 +64,11 @@ cleanup_firewall() {
         while IFS= read -r PORT; do
             [[ "$PORT" =~ ^[0-9]+$ ]] || continue
             del_rule nat PREROUTING "-p tcp --dport $PORT -j REDIRECT --to-port $MAIN_PORT"
-            del_rule filter INPUT "-p tcp --dport $PORT -j ACCEPT"   # FIX: clean INPUT too
+            del_rule filter INPUT "-p tcp --dport $PORT -j ACCEPT"
         done < "$FORWARD_FILE"
     fi
 
     [ -n "$MAIN_PORT" ] && del_rule filter INPUT "-p tcp --dport $MAIN_PORT -j ACCEPT"
-
     del_rule filter INPUT "-i tun+ -j ACCEPT"
     del_rule filter OUTPUT "-o tun+ -j ACCEPT"
     del_rule filter FORWARD "-i tun+ -j ACCEPT"
@@ -68,9 +78,7 @@ cleanup_firewall() {
     del_rule filter FORWARD "-s $TUNNEL_SUBNET -j ACCEPT"
     del_rule filter FORWARD "-d $TUNNEL_SUBNET -j ACCEPT"
     del_rule filter FORWARD "-m state --state ESTABLISHED,RELATED -j ACCEPT"
-    # FIX: remove MSS clamp on cleanup too
     del_rule mangle FORWARD "-p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
-
     print_success "Firewall cleaned up"
 }
 
@@ -79,7 +87,6 @@ save_iptables() {
     netfilter-persistent save >/dev/null 2>&1 || iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
 }
 
-# FIX: install & enable persistence for real (was silently skipped with || true)
 ensure_iptables_persistent() {
     if ! command -v netfilter-persistent &>/dev/null; then
         print_status "Installing iptables-persistent..."
@@ -97,12 +104,7 @@ load_tun_module() {
         mknod /dev/net/tun c 10 200 2>/dev/null || true
         chmod 600 /dev/net/tun 2>/dev/null || true
     fi
-    if [ -c /dev/net/tun ]; then
-        print_success "TUN device ready"
-    else
-        print_error "TUN device not available!"
-        return 1
-    fi
+    [ -c /dev/net/tun ] && print_success "TUN device ready" || { print_error "TUN device not available!"; return 1; }
 }
 
 enable_ip_forwarding() {
@@ -110,7 +112,6 @@ enable_ip_forwarding() {
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
     sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1
     sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null 2>&1
-
     if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf 2>/dev/null; then
         echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
     fi
@@ -127,7 +128,6 @@ enable_ip_forwarding() {
 setup_tunnel_firewall() {
     local MAIN_PORT=$1
     print_status "Setting up firewall rules..."
-
     if ! command -v iptables &>/dev/null; then
         apt-get update -qq && apt-get install -y -qq iptables
     fi
@@ -139,14 +139,10 @@ setup_tunnel_firewall() {
     iptables -A OUTPUT -o tun+ -j ACCEPT
     iptables -A FORWARD -i tun+ -j ACCEPT
     iptables -A FORWARD -o tun+ -j ACCEPT
-
     [ -n "$MAIN_PORT" ] && iptables -A INPUT -p tcp --dport "$MAIN_PORT" -j ACCEPT 2>/dev/null || true
-
     iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
-    # FIX: MSS clamp -> TCP through the tunnel now works
     iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
-    # FIX: delete-then-add -> never duplicate MASQUERADE
     del_rule nat POSTROUTING "-s $TUNNEL_SUBNET -o $MAIN_IFACE -j MASQUERADE"
     del_rule nat POSTROUTING "-s $TUNNEL_SUBNET -j MASQUERADE"
     iptables -t nat -A POSTROUTING -s "$TUNNEL_SUBNET" -o "$MAIN_IFACE" -j MASQUERADE 2>/dev/null || \
@@ -154,7 +150,6 @@ setup_tunnel_firewall() {
 
     iptables -A FORWARD -s "$TUNNEL_SUBNET" -j ACCEPT
     iptables -A FORWARD -d "$TUNNEL_SUBNET" -j ACCEPT
-
     save_iptables
     print_success "Firewall rules applied (main iface: $MAIN_IFACE)"
 }
@@ -176,9 +171,7 @@ wait_for_tun_iface() {
     local MAX_WAIT=${1:-30}
     local TUN_IFACE=""
     print_status "Waiting for TUN interface (max ${MAX_WAIT}s)..."
-
     for i in $(seq 1 $MAX_WAIT); do
-        # FIX: match the real name "flagtun0" explicitly
         TUN_IFACE=$(ip -o link show 2>/dev/null | grep -oE 'flagtun[0-9]+' | head -1)
         [ -z "$TUN_IFACE" ] && TUN_IFACE=$(ip -o link show 2>/dev/null | grep -oE '\btun[0-9]+' | head -1)
         [ -n "$TUN_IFACE" ] && { print_success "TUN interface detected: $TUN_IFACE"; echo "$TUN_IFACE"; return 0; }
@@ -191,17 +184,13 @@ wait_for_tun_iface() {
 setup_routing() {
     local PEER_TUN_IP=$1
     local TUN_IFACE=""
-
     print_status "Setting up routing through tunnel..."
     TUN_IFACE=$(wait_for_tun_iface 30) || return 1
     sleep 2
-
     ip route del "$TUNNEL_SUBNET" dev "$TUN_IFACE" 2>/dev/null || true
     ip route del "${PEER_TUN_IP}/32" dev "$TUN_IFACE" 2>/dev/null || true
-
     ip link set "$TUN_IFACE" mtu "$TUN_MTU" 2>/dev/null || true
     ip link set "$TUN_IFACE" up 2>/dev/null || true
-
     ip route add "${PEER_TUN_IP}/32" dev "$TUN_IFACE" 2>/dev/null || true
     ip route add "$TUNNEL_SUBNET" dev "$TUN_IFACE" 2>/dev/null || true
 
@@ -220,51 +209,39 @@ EOF
     print_success "Routing configured: $PEER_TUN_IP via $TUN_IFACE (MTU $TUN_MTU)"
 }
 
-# Full tunnel for IRAN SERVER (route all traffic through tunnel to foreign client)
 setup_full_tunnel_server() {
     local FOREIGN_PEER_IP=$1
     local TUN_IFACE=""
-
     print_status "Enabling SERVER FULL TUNNEL (Iran -> Foreign)..."
     TUN_IFACE=$(wait_for_tun_iface 10) || return 1
-
     local MAIN_GW MAIN_IFACE
     MAIN_GW=$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')
     MAIN_IFACE=$(detect_main_iface)
-
     if [ -z "$MAIN_GW" ] || [ -z "$MAIN_IFACE" ]; then
-        print_error "Cannot detect default gateway"
-        return 1
+        print_error "Cannot detect default gateway"; return 1
     fi
-
     cat > "${INSTALL_DIR}/.full_tunnel_backup" << EOF
 MAIN_GW=$MAIN_GW
 MAIN_IFACE=$MAIN_IFACE
 FOREIGN_PEER=$FOREIGN_PEER_IP
 EOF
-
     ip route del "$FOREIGN_PEER_IP" 2>/dev/null || true
     ip route add "$FOREIGN_PEER_IP" via "$MAIN_GW" dev "$MAIN_IFACE" 2>/dev/null || true
-
     ip route del default dev "$TUN_IFACE" metric 100 2>/dev/null || true
     ip route add default dev "$TUN_IFACE" metric 100 2>/dev/null || true
-
     touch "$FULL_TUNNEL_FLAG"
     print_success "Server full tunnel enabled."
     print_info "Foreign peer $FOREIGN_PEER_IP kept on $MAIN_IFACE."
 }
 
-# Full tunnel for FOREIGN CLIENT (NAT traffic coming from tunnel to internet)
 setup_full_tunnel_client() {
     print_status "Enabling CLIENT FULL TUNNEL (Foreign -> Internet NAT)..."
     local TUN_IFACE
     TUN_IFACE=$(wait_for_tun_iface 10) || return 1
-
     del_rule nat POSTROUTING "-s $TUNNEL_SUBNET -o $MAIN_IFACE -j MASQUERADE"
     del_rule nat POSTROUTING "-s $TUNNEL_SUBNET -j MASQUERADE"
     iptables -t nat -A POSTROUTING -s "$TUNNEL_SUBNET" -o "$MAIN_IFACE" -j MASQUERADE 2>/dev/null || \
     iptables -t nat -A POSTROUTING -s "$TUNNEL_SUBNET" -j MASQUERADE
-
     save_iptables
     touch "$FULL_TUNNEL_FLAG"
     print_success "Client NAT ready for tunnel traffic."
@@ -274,15 +251,12 @@ remove_full_tunnel() {
     print_status "Disabling full tunnel mode..."
     local TUN_IFACE
     TUN_IFACE=$(ip -o link show 2>/dev/null | grep -oE 'flagtun[0-9]+' | head -1)
-
     [ -n "$TUN_IFACE" ] && ip route del default dev "$TUN_IFACE" metric 100 2>/dev/null || true
-
     if [ -f "${INSTALL_DIR}/.full_tunnel_backup" ]; then
         local FOREIGN_PEER
         FOREIGN_PEER=$(grep "^FOREIGN_PEER=" "${INSTALL_DIR}/.full_tunnel_backup" 2>/dev/null | cut -d= -f2)
         [ -n "$FOREIGN_PEER" ] && ip route del "$FOREIGN_PEER" 2>/dev/null || true
     fi
-
     rm -f "$FULL_TUNNEL_FLAG" "${INSTALL_DIR}/.full_tunnel_backup"
     print_success "Full tunnel disabled"
 }
@@ -291,17 +265,14 @@ setup_port_redirection() {
     local MAIN_PORT=$1
     local REDIRECT_PORTS=$2
     [ -z "$REDIRECT_PORTS" ] && return 0
-
     print_status "Setting up port redirection to Stinger main port..."
     > "$FORWARD_FILE"
     IFS=',' read -ra PORT_ARRAY <<< "$REDIRECT_PORTS"
-
     for PORT in "${PORT_ARRAY[@]}"; do
         PORT=$(echo "$PORT" | tr -d ' ')
         if [[ "$PORT" =~ ^[0-9]+$ ]]; then
             del_rule nat PREROUTING "-p tcp --dport $PORT -j REDIRECT --to-port $MAIN_PORT"
             iptables -t nat -A PREROUTING -p tcp --dport "$PORT" -j REDIRECT --to-port "$MAIN_PORT"
-            # FIX: must also ACCEPT the port in INPUT (was missing -> forward dead)
             del_rule filter INPUT "-p tcp --dport $PORT -j ACCEPT"
             iptables -A INPUT -p tcp --dport "$PORT" -j ACCEPT
             echo "$PORT" >> "$FORWARD_FILE"
@@ -314,12 +285,11 @@ setup_port_redirection() {
 remove_port_redirection() {
     local MAIN_PORT="${1:-}"
     [ ! -f "$FORWARD_FILE" ] && return 0
-
     print_status "Removing port redirection..."
     while IFS= read -r PORT; do
         [[ "$PORT" =~ ^[0-9]+$ ]] || continue
         del_rule nat PREROUTING "-p tcp --dport $PORT -j REDIRECT --to-port $MAIN_PORT"
-        del_rule filter INPUT "-p tcp --dport $PORT -j ACCEPT"   # FIX: clean INPUT too
+        del_rule filter INPUT "-p tcp --dport $PORT -j ACCEPT"
     done < "$FORWARD_FILE"
     rm -f "$FORWARD_FILE"
     save_iptables
@@ -327,9 +297,6 @@ remove_port_redirection() {
 
 create_systemd_service() {
     print_status "Creating systemd service..."
-
-    # FIX: tun-setup.sh now exits 0 always (never kills the unit), MTU 1320,
-    #      and restores the full-tunnel default route after every boot.
     cat > "${INSTALL_DIR}/tun-setup.sh" << 'EOF'
 #!/bin/bash
 INSTALL_DIR="/opt/stinger"
@@ -339,6 +306,8 @@ FLAG="${INSTALL_DIR}/.full_tunnel_enabled"
 BACKUP="${INSTALL_DIR}/.full_tunnel_backup"
 
 PEER_TUN=$(grep "peer_tun" "$CONF" 2>/dev/null | head -n1 | sed 's/.*= *"\(.*\)".*/\1/')
+TUN_MTU=$(grep -oE 'mtu [0-9]+' /etc/network/if-up.d/stinger-routes 2>/dev/null | grep -oE '[0-9]+' | head -1)
+[ -z "$TUN_MTU" ] && TUN_MTU=1320
 TUN_IFACE=""
 
 for i in {1..30}; do
@@ -348,10 +317,10 @@ for i in {1..30}; do
     sleep 1
 done
 
-# Never exit non-zero: a failure here must NOT kill the stinger service
+# NEVER exit non-zero: a failure here must not kill the stinger service
 [ -z "$TUN_IFACE" ] && { echo "TUN interface not found (giving up, staying alive)"; exit 0; }
 
-ip link set "$TUN_IFACE" mtu 1320 2>/dev/null || true
+ip link set "$TUN_IFACE" mtu "$TUN_MTU" 2>/dev/null || true
 ip link set "$TUN_IFACE" up 2>/dev/null || true
 
 if [ -n "$PEER_TUN" ]; then
@@ -410,10 +379,10 @@ EOF
 }
 
 start_service() {
+    fix_transport_config
     print_status "Starting Stinger service..."
     systemctl restart "${SERVICE_NAME}"
     sleep 5
-
     if systemctl is-active --quiet "${SERVICE_NAME}"; then
         print_success "Stinger is RUNNING"
         sleep 3
@@ -430,31 +399,25 @@ stop_service() {
     if [ -f "${INSTALL_DIR}/config.toml" ]; then
         MAIN_PORT=$(grep -E "^\s*port\s*=" "${INSTALL_DIR}/config.toml" 2>/dev/null | head -n1 | sed 's/.*= *\([0-9]*\).*/\1/')
     fi
-
     systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
     pkill -f "stinger" 2>/dev/null || true
-
     local TUN_IFACE
     TUN_IFACE=$(ip -o link show 2>/dev/null | grep -oE 'flagtun[0-9]+' | head -1)
     if [ -n "$TUN_IFACE" ]; then
         ip route flush dev "$TUN_IFACE" 2>/dev/null || true
         ip link del "$TUN_IFACE" 2>/dev/null || true
     fi
-
     cleanup_firewall "$MAIN_PORT"
     [ -f "$FULL_TUNNEL_FLAG" ] && remove_full_tunnel
-
     print_success "Stinger stopped and cleaned up"
 }
 
 uninstall_stinger() {
     echo ""; print_header "Uninstalling..."
-
     local MAIN_PORT=""
     if [ -f "${INSTALL_DIR}/config.toml" ]; then
         MAIN_PORT=$(grep -E "^\s*port\s*=" "${INSTALL_DIR}/config.toml" 2>/dev/null | head -n1 | sed 's/.*= *\([0-9]*\).*/\1/')
     fi
-
     stop_service
     remove_port_redirection "$MAIN_PORT"
     systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
@@ -469,7 +432,6 @@ uninstall_stinger() {
 download_and_patch_binary() {
     print_status "Downloading binary..."
     wget -q --show-progress -O "${BINARY_NAME}.original" "$ORIGINAL_URL" || { print_error "Download failed!"; return 1; }
-
     print_status "Removing restrictions..."
     if file "${BINARY_NAME}.original" | grep -q "shell script"; then
         cp "${BINARY_NAME}.original" "${BINARY_NAME}"
@@ -491,11 +453,49 @@ WRAPPER
     chmod +x "${BINARY_NAME}"
 }
 
+# NEW: find the largest ICMP payload the ISP passes, then lower TUN MTU to match
+icmp_mtu_tune() {
+    echo ""; print_header "ICMP Size Test & MTU Auto-tune"
+    local REMOTE_PUB
+    REMOTE_PUB=$(grep "remote_ip" "${INSTALL_DIR}/config.toml" 2>/dev/null | head -n1 | sed 's/.*= *"\(.*\)".*/\1/')
+    [ -z "$REMOTE_PUB" ] || [ "$REMOTE_PUB" = "0.0.0.0" ] && read -p "  Remote public IP: " REMOTE_PUB </dev/tty
+    [ -z "$REMOTE_PUB" ] && { print_error "No remote IP to test"; read -p "Press Enter..." </dev/tty; return; }
+
+    local sizes=(1472 1300 1200 1000 800 600 400 200 100)
+    local best=0 s
+    for s in "${sizes[@]}"; do
+        if ping -s "$s" -M do -c 2 -W 2 "$REMOTE_PUB" >/dev/null 2>&1; then
+            print_success "ICMP payload $s OK"
+            best=$s
+            break
+        else
+            print_warning "ICMP payload $s FAILED"
+        fi
+    done
+
+    if [ "$best" -gt 0 ]; then
+        local new_mtu=$((best - 56))
+        [ "$new_mtu" -lt 576 ] && new_mtu=576
+        print_info "Max working ICMP payload: $best -> setting TUN MTU to $new_mtu"
+        TUN_MTU=$new_mtu
+        local TUN_IFACE
+        TUN_IFACE=$(ip -o link show 2>/dev/null | grep -oE 'flagtun[0-9]+' | head -1)
+        [ -n "$TUN_IFACE" ] && ip link set "$TUN_IFACE" mtu "$new_mtu" 2>/dev/null
+        sed -i "s/mtu [0-9]*/mtu $new_mtu/" "${INSTALL_DIR}/tun-setup.sh" 2>/dev/null || true
+        sed -i "s/TUN_MTU=.*/TUN_MTU=$new_mtu/" /root/stinger-fixed.sh 2>/dev/null || true
+        print_success "TUN MTU set to $new_mtu (persists via tun-setup.sh)"
+        print_info "Test now: ping -c 3 10.0.0.2  and  curl -4 ip.gs"
+    else
+        print_error "NO ICMP payload passes -> the ISP is blocking ICMP tunneling entirely."
+        print_error "Stinger (ICMP-only) is a dead end on this path. Use a TCP/UDP tunnel tool instead."
+    fi
+    read -p "Press Enter..." </dev/tty
+}
+
 install_server() {
     echo ""; print_header "Installing Stinger SERVER (Iran)..."
     command -v wget &>/dev/null || { apt-get update -qq && apt-get install -y -qq wget file iproute2; }
     mkdir -p "$INSTALL_DIR" && cd "$INSTALL_DIR"
-
     download_and_patch_binary
 
     echo ""
@@ -507,11 +507,9 @@ install_server() {
     LOCAL_TUN=${LOCAL_TUN:-10.0.0.1/24}
     read -p "  Client Tunnel IP (peer_tun) [10.0.0.2]: " PEER_TUN </dev/tty
     PEER_TUN=${PEER_TUN:-10.0.0.2}
-    # FIX: transport is now selectable; tcp default (icmp gets dropped for data in Iran)
-    read -p "  Transport (tcp/udp/icmp) [tcp]: " TRANSPORT </dev/tty
-    TRANSPORT=${TRANSPORT:-tcp}
     echo ""
-    print_info "Extra ports to redirect to Stinger (e.g. 443,2053) or Enter:"
+    print_info "This build is ICMP-only (transport=icmp is forced)."
+    print_info "Extra ports to redirect to Stinger (e.g. 2053,8443) or Enter:"
     read -p "  Ports: " REDIRECT_PORTS </dev/tty
 
     cat > config.toml << EOF
@@ -519,7 +517,6 @@ mode = "server"
 remote_ip = "${REMOTE_IP}"
 local_tun = "${LOCAL_TUN}"
 peer_tun = "${PEER_TUN}"
-transport = "${TRANSPORT}"
 
 [server]
 host = "0.0.0.0"
@@ -533,7 +530,6 @@ EOF
     [ -n "$REDIRECT_PORTS" ] && setup_port_redirection "$MAIN_PORT" "$REDIRECT_PORTS"
     create_systemd_service
     start_service || { print_error "Service failed to start"; return 1; }
-
     sleep 3
     setup_routing "$PEER_TUN"
 
@@ -545,12 +541,11 @@ EOF
     print_success "============================================"
     print_success "SERVER (IRAN) INSTALLED!"
     print_success "============================================"
-    print_info "  Port: $MAIN_PORT | Tunnel: $LOCAL_TUN | Transport: $TRANSPORT"
-    print_info "  Peer: $PEER_TUN"
-    print_info "  Main Interface: $MAIN_IFACE"
+    print_info "  Port: $MAIN_PORT | Tunnel: $LOCAL_TUN | Transport: icmp"
+    print_info "  Peer: $PEER_TUN | Main Interface: $MAIN_IFACE"
     [ -n "$REDIRECT_PORTS" ] && print_info "  Redirected to Stinger: $REDIRECT_PORTS"
     [[ "$FULL_TUN" =~ ^[Yy]$ ]] && print_info "  Mode: FULL TUNNEL (all traffic -> foreign)"
-    print_info "  Test: curl -4 ip.gs  (must show FOREIGN IP)"
+    print_info "  Next: run 'ICMP Size Test & MTU Auto-tune' (menu 11)"
     print_success "============================================"
 }
 
@@ -558,7 +553,6 @@ install_client() {
     echo ""; print_header "Installing Stinger CLIENT (Foreign)..."
     command -v wget &>/dev/null || { apt-get update -qq && apt-get install -y -qq wget file iproute2; }
     mkdir -p "$INSTALL_DIR" && cd "$INSTALL_DIR"
-
     download_and_patch_binary
 
     echo ""
@@ -570,15 +564,12 @@ install_client() {
     LOCAL_TUN=${LOCAL_TUN:-10.0.0.2/24}
     read -p "  Server Tunnel IP (peer_tun) [10.0.0.1]: " PEER_TUN </dev/tty
     PEER_TUN=${PEER_TUN:-10.0.0.1}
-    read -p "  Transport (tcp/udp/icmp) [tcp]: " TRANSPORT </dev/tty
-    TRANSPORT=${TRANSPORT:-tcp}
 
     cat > config.toml << EOF
 mode = "client"
 remote_ip = "${SERVER_IP}"
 local_tun = "${LOCAL_TUN}"
 peer_tun = "${PEER_TUN}"
-transport = "${TRANSPORT}"
 
 [client]
 server_host = "${SERVER_IP}"
@@ -591,7 +582,6 @@ EOF
     setup_tunnel_firewall "$SERVER_PORT"
     create_systemd_service
     start_service || { print_error "Service failed to start"; return 1; }
-
     sleep 3
     setup_routing "$PEER_TUN"
     setup_full_tunnel_client
@@ -600,18 +590,15 @@ EOF
     print_success "============================================"
     print_success "CLIENT (FOREIGN) INSTALLED!"
     print_success "============================================"
-    print_info "  Server: $SERVER_IP:$SERVER_PORT | Transport: $TRANSPORT"
+    print_info "  Server: $SERVER_IP:$SERVER_PORT | Transport: icmp"
     print_info "  Tunnel: $LOCAL_TUN | Peer: $PEER_TUN"
-    print_info "  Main Interface: $MAIN_IFACE"
     print_info "  NAT enabled for tunnel subnet"
-    print_info "  Test: ping $PEER_TUN"
     print_success "============================================"
 }
 
 check_status() {
     echo ""; print_header "Status Report"
     echo "============================================"
-
     echo -e "\n${YELLOW}[1] Service:${NC}"
     if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
         PID=$(systemctl show -p MainPID --value "${SERVICE_NAME}" 2>/dev/null)
@@ -620,8 +607,8 @@ check_status() {
         print_error "NOT RUNNING"
     fi
 
-    echo -e "\n${YELLOW}[2] Transport & Config:${NC}"
-    grep -E "mode|transport|remote_ip|local_tun|peer_tun|port" "${INSTALL_DIR}/config.toml" 2>/dev/null | sed 's/^/  /'
+    echo -e "\n${YELLOW}[2] Config:${NC}"
+    grep -E "mode|remote_ip|local_tun|peer_tun|transport|port" "${INSTALL_DIR}/config.toml" 2>/dev/null | sed 's/^/  /'
 
     echo -e "\n${YELLOW}[3] IP Forwarding & rp_filter:${NC}"
     [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" = "1" ] && print_success "ip_forward ENABLED" || print_error "ip_forward DISABLED"
@@ -660,7 +647,6 @@ check_status() {
 
     echo -e "\n${YELLOW}[8] Last Logs:${NC}"
     journalctl -u "${SERVICE_NAME}" -n 8 --no-pager 2>/dev/null | sed 's/^/  /'
-
     echo -e "\n============================================"
     read -p "Press Enter..." </dev/tty
 }
@@ -669,19 +655,11 @@ test_connection() {
     echo ""; print_header "Connection Test"
     read -p "  Ping target (server=10.0.0.1 / client=10.0.0.2): " TARGET </dev/tty
     TARGET=${TARGET:-10.0.0.1}
-
     print_status "Pinging $TARGET through tunnel..."
     if ping -c 4 -W 3 "$TARGET" 2>/dev/null; then
         echo ""; print_success "TUNNEL WORKING! Traffic is passing."
     else
-        echo ""; print_error "FAILED! Troubleshooting:"
-        echo "  1. Check both sides running: systemctl status stinger-tunnel"
-        echo "  2. Check transport in logs: journalctl -u stinger-tunnel | grep transport"
-        echo "  3. Make sure both configs use the SAME transport (tcp recommended)"
-        echo "  4. Check TUN interface: ip link show | grep flagtun"
-        echo "  5. Check routes: ip route | grep 10.0.0"
-        echo "  6. Check firewall: iptables -L -n | grep tun"
-        echo "  7. Try restart: systemctl restart stinger-tunnel"
+        echo ""; print_error "FAILED! Run 'ICMP Size Test & MTU Auto-tune' (menu 11)."
     fi
     read -p "Press Enter..." </dev/tty
 }
@@ -689,30 +667,22 @@ test_connection() {
 repair_tunnel() {
     echo ""; print_header "Repair Tunnel"
     print_status "Attempting automatic repair..."
-
     load_tun_module
     fix_broad_nat
-
     local PORT="" PEER_TUN=""
     if [ -f "${INSTALL_DIR}/config.toml" ]; then
         PORT=$(grep -E "^\s*port\s*=" "${INSTALL_DIR}/config.toml" 2>/dev/null | head -n1 | sed 's/.*= *\([0-9]*\).*/\1/')
         PEER_TUN=$(grep "peer_tun" "${INSTALL_DIR}/config.toml" 2>/dev/null | head -n1 | sed 's/.*= *"\(.*\)".*/\1/')
     fi
-
     cleanup_firewall "$PORT"
     setup_tunnel_firewall "$PORT"
-
     [ -n "$PEER_TUN" ] && setup_routing "$PEER_TUN"
-
-    # FIX: re-apply full tunnel after repair if it was enabled
     if [ -f "$FULL_TUNNEL_FLAG" ] && [ -n "$PEER_TUN" ]; then
         setup_full_tunnel_server "$PEER_TUN"
     fi
-
     systemctl restart "${SERVICE_NAME}"
     sleep 5
     bash "${INSTALL_DIR}/tun-setup.sh" 2>/dev/null || true
-
     if systemctl is-active --quiet "${SERVICE_NAME}"; then
         print_success "Repair complete!"
     else
@@ -737,7 +707,7 @@ toggle_server_full_tunnel() {
 while true; do
     clear
     echo "============================================"
-    echo "  Stinger Tunnel - Fixed Edition v5"
+    echo "  Stinger Tunnel - Fixed Edition v6 (ICMP)"
     echo "  Server=IRAN  |  Client=FOREIGN"
     echo "============================================"
     echo ""
@@ -751,9 +721,10 @@ while true; do
     print_menu "8. Uninstall"
     print_menu "9. Toggle Server Full Tunnel (Iran)"
     print_menu "10. Fix Broad NAT Rules"
-    print_menu "11. Exit"
+    print_menu "11. ICMP Size Test & MTU Auto-tune"
+    print_menu "12. Exit"
     echo ""
-    read -p "Select [1-11]: " CHOICE </dev/tty
+    read -p "Select [1-12]: " CHOICE </dev/tty
     case $CHOICE in
         1) install_server; read -p "Press Enter..." </dev/tty ;;
         2) install_client; read -p "Press Enter..." </dev/tty ;;
@@ -765,7 +736,8 @@ while true; do
         8) uninstall_stinger; read -p "Press Enter..." </dev/tty ;;
         9) toggle_server_full_tunnel ;;
         10) fix_broad_nat; read -p "Press Enter..." </dev/tty ;;
-        11) exit 0 ;;
+        11) icmp_mtu_tune ;;
+        12) exit 0 ;;
         *) sleep 1 ;;
     esac
 done
