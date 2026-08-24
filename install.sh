@@ -15,7 +15,77 @@ print_info() { echo -e "${CYAN}[i]${NC} $1"; }
 
 BINARY_NAME="stinger"
 ORIGINAL_URL="https://github.com/lostsoul6/stinger-binary/raw/refs/heads/main/stinger"
+FORWARD_FILE="forwarded_ports.txt"
 
+# ============================================
+# Port Forwarding Functions
+# ============================================
+setup_port_forwarding() {
+    local MAIN_PORT=$1
+    local FORWARD_PORTS=$2
+    
+    if [ -z "$FORWARD_PORTS" ]; then
+        print_info "No additional ports to forward."
+        return 0
+    fi
+    
+    print_status "Setting up port forwarding rules..."
+    
+    # Install iptables-persistent for saving rules
+    if ! command -v iptables-save &> /dev/null; then
+        print_warning "iptables-persistent not found, installing..."
+        sudo apt-get update -qq && sudo apt-get install -y -qq iptables-persistent
+    fi
+    
+    # Clear previous forwarding file
+    > "$FORWARD_FILE"
+    
+    # Parse comma-separated ports
+    IFS=',' read -ra PORT_ARRAY <<< "$FORWARD_PORTS"
+    
+    for PORT in "${PORT_ARRAY[@]}"; do
+        PORT=$(echo "$PORT" | tr -d ' ')
+        if [[ "$PORT" =~ ^[0-9]+$ ]]; then
+            # Remove existing rule if any (to avoid duplicates)
+            sudo iptables -t nat -D PREROUTING -p tcp --dport "$PORT" -j REDIRECT --to-port "$MAIN_PORT" 2>/dev/null || true
+            
+            # Add new rule
+            sudo iptables -t nat -A PREROUTING -p tcp --dport "$PORT" -j REDIRECT --to-port "$MAIN_PORT"
+            echo "$PORT" >> "$FORWARD_FILE"
+            print_success "Forwarding port $PORT -> $MAIN_PORT"
+        else
+            print_warning "Invalid port skipped: $PORT"
+        fi
+    done
+    
+    # Save iptables rules for persistence
+    sudo netfilter-persistent save 2>/dev/null || sudo iptables-save > /tmp/iptables.rules 2>/dev/null || true
+    print_success "Port forwarding rules saved and applied!"
+}
+
+remove_port_forwarding() {
+    if [ ! -f "$FORWARD_FILE" ]; then
+        return 0
+    fi
+    
+    print_status "Removing port forwarding rules..."
+    
+    while IFS= read -r PORT; do
+        if [[ "$PORT" =~ ^[0-9]+$ ]]; then
+            sudo iptables -t nat -D PREROUTING -p tcp --dport "$PORT" -j REDIRECT 2>/dev/null || true
+            sudo iptables -t nat -D PREROUTING -p tcp --dport "$PORT" -j REDIRECT --to-port 8080 2>/dev/null || true
+            print_success "Removed forwarding for port $PORT"
+        fi
+    done < "$FORWARD_FILE"
+    
+    rm -f "$FORWARD_FILE"
+    sudo netfilter-persistent save 2>/dev/null || true
+    print_success "All port forwarding rules removed!"
+}
+
+# ============================================
+# Start Stinger in Background (Automatic)
+# ============================================
 start_stinger() {
     pkill -f "stinger.bin" 2>/dev/null || true
     pkill -x "stinger" 2>/dev/null || true
@@ -39,13 +109,20 @@ start_stinger() {
         echo ""
         print_header "📋 Error log:"
         cat stinger.log | sed 's/^/  /'
-        rm -f stinger.pid # Clean up stale PID on crash
+        rm -f stinger.pid
     fi
 }
 
+# ============================================
+# Stop Stinger
+# ============================================
 stop_stinger() {
     echo ""
     print_header "🛑 Stopping Stinger..."
+    
+    # Remove port forwarding rules
+    remove_port_forwarding
+    
     if [ -f "stinger.pid" ]; then
         PID=$(cat stinger.pid)
         if kill -0 "$PID" 2>/dev/null; then
@@ -63,6 +140,9 @@ stop_stinger() {
     fi
 }
 
+# ============================================
+# Uninstall Function
+# ============================================
 uninstall_stinger() {
     echo ""
     print_header "🗑️  Uninstalling Stinger..."
@@ -73,9 +153,13 @@ uninstall_stinger() {
     [ -f "config.toml" ] && rm -f "config.toml" && print_success "Removed: config.toml"
     [ -f "stinger.log" ] && rm -f "stinger.log" && print_success "Removed: stinger.log"
     [ -f "stinger.pid" ] && rm -f "stinger.pid" && print_success "Removed: stinger.pid"
+    [ -f "$FORWARD_FILE" ] && rm -f "$FORWARD_FILE" && print_success "Removed: $FORWARD_FILE"
     echo ""; print_success "✅ Uninstall completed! All files and processes removed."
 }
 
+# ============================================
+# Install & Start Server Function (With Port Forwarding)
+# ============================================
 install_server() {
     echo ""; print_header "🖥️  Installing & Starting Stinger Server..."
     
@@ -105,10 +189,17 @@ WRAPPER
     echo ""
     read -p "  🌐 Enter Remote IP (Client IP or 0.0.0.0 for any) [0.0.0.0]: " REMOTE_IP < /dev/tty
     REMOTE_IP=${REMOTE_IP:-0.0.0.0}
-    read -p "  🔗 Enter Server Port [8080]: " SERVER_PORT < /dev/tty
-    SERVER_PORT=${SERVER_PORT:-8080}
+    
+    read -p "  🔗 Enter Main Tunnel Port (Stinger will listen on this) [8080]: " MAIN_PORT < /dev/tty
+    MAIN_PORT=${MAIN_PORT:-8080}
+    
     read -p "  🛜  Enter Local Tunnel IP (Server Virtual IP) [10.0.0.1/24]: " LOCAL_TUN < /dev/tty
     LOCAL_TUN=${LOCAL_TUN:-10.0.0.1/24}
+    
+    echo ""
+    print_info "💡 You can forward additional ports to the main tunnel port."
+    print_info "   Example: 443,2053,8443 (leave empty to skip)"
+    read -p "  🔀 Enter additional ports to forward (comma-separated): " FORWARD_PORTS < /dev/tty
     
     print_status "Creating SERVER configuration..."
     cat > config.toml << EOF
@@ -123,18 +214,30 @@ local_tun = "${LOCAL_TUN}"
 
 [server]
 host = "0.0.0.0"
-port = ${SERVER_PORT}
+port = ${MAIN_PORT}
 remote_ip = "${REMOTE_IP}"
 local_tun = "${LOCAL_TUN}"
 EOF
     
     chmod +x "${BINARY_NAME}"
-    print_success "✅ Server setup completed! (mode=server, remote_ip=${REMOTE_IP}, port=${SERVER_PORT}, local_tun=${LOCAL_TUN})"
+    print_success "✅ Server setup completed! (mode=server, port=${MAIN_PORT}, local_tun=${LOCAL_TUN})"
+    
+    # Setup port forwarding if additional ports were provided
+    if [ -n "$FORWARD_PORTS" ]; then
+        setup_port_forwarding "$MAIN_PORT" "$FORWARD_PORTS"
+        echo ""
+        print_success "🔀 Port forwarding active:"
+        echo "     Main tunnel port: $MAIN_PORT"
+        echo "     Forwarded ports: $FORWARD_PORTS -> $MAIN_PORT"
+    fi
     
     echo ""
     start_stinger
 }
 
+# ============================================
+# Install & Start Client Function
+# ============================================
 install_client() {
     echo ""; print_header "💻 Installing & Starting Stinger Client..."
     
@@ -164,7 +267,7 @@ WRAPPER
     echo ""
     read -p "  🌐 Enter Server IP (remote_ip) [127.0.0.1]: " SERVER_IP < /dev/tty
     SERVER_IP=${SERVER_IP:-127.0.0.1}
-    read -p "  🔗 Enter Server Port [8080]: " SERVER_PORT < /dev/tty
+    read -p "  🔗 Enter Server Port (Use ONE port, e.g. 443) [8080]: " SERVER_PORT < /dev/tty
     SERVER_PORT=${SERVER_PORT:-8080}
     read -p "  🛜  Enter Local Tunnel IP (Client Virtual IP) [10.0.0.2/24]: " LOCAL_TUN < /dev/tty
     LOCAL_TUN=${LOCAL_TUN:-10.0.0.2/24}
@@ -194,6 +297,9 @@ EOF
     start_stinger
 }
 
+# ============================================
+# Check Status Function
+# ============================================
 check_status() {
     echo ""; print_header "🔍 Checking Stinger Status..."
     echo "═══════════════════════════════════════════"
@@ -242,7 +348,17 @@ check_status() {
         fi
     fi
 
-    echo -e "\n${YELLOW}[4] Recent Logs:${NC}"
+    echo -e "\n${YELLOW}[4] Port Forwarding Rules:${NC}"
+    if [ -f "$FORWARD_FILE" ]; then
+        print_success "Active port forwarding rules:"
+        while IFS= read -r PORT; do
+            echo -e "  ${CYAN}▸${NC} Port $PORT -> Main tunnel port"
+        done < "$FORWARD_FILE"
+    else
+        print_info "No port forwarding rules configured."
+    fi
+
+    echo -e "\n${YELLOW}[5] Recent Logs:${NC}"
     if [ -f "stinger.log" ]; then
         tail -n 5 stinger.log | sed 's/^/  /'
     else
@@ -253,13 +369,16 @@ check_status() {
     read -p "Press Enter to return to menu..." < /dev/tty
 }
 
+# ============================================
+# Main Menu Loop
+# ============================================
 while true; do
     clear
     echo "═══════════════════════════════════════════"
     echo "  🔓 Stinger Unlocked - Complete Installer"
     echo "═══════════════════════════════════════════"
     echo ""
-    print_menu "1. 🖥️  Install & Start Server (Auto)"
+    print_menu "1. 🖥️  Install & Start Server (Auto + Port Forwarding)"
     print_menu "2. 💻 Install & Start Client (Auto)"
     print_menu "3. 🔍 Check Status (Tunnel & Process)"
     print_menu "4. 🛑 Stop Tunnel"
