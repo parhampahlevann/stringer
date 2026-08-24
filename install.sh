@@ -27,7 +27,7 @@ print_success() { echo -e "${GREEN}[✓]${NC} $1"; }
 print_error() { echo -e "${RED}[✗]${NC} $1"; }
 print_warning() { echo -e "${YELLOW}[!]${NC} $1"; }
 print_info() { echo -e "${CYAN}[i]${NC} $1"; }
-print_header() { echo -e "${GREEN}▶${NC} $1"; }   # <-- DEFINED HERE
+print_header() { echo -e "${GREEN}▶${NC} $1"; }
 print_menu() { echo -e "${BLUE}▸${NC} $1"; }
 
 clear
@@ -63,7 +63,8 @@ print_status "Downloading original stinger from:"
 echo "  $ORIGINAL_URL"
 echo ""
 
-if wget -q --show-progress -O ${BINARY_NAME}.original "$ORIGINAL_URL"; then
+# Removed -q so the download progress bar actually shows up
+if wget --show-progress -O "${BINARY_NAME}.original" "$ORIGINAL_URL"; then
     print_success "Download completed"
 else
     print_error "Download failed! Please check your internet connection."
@@ -75,37 +76,37 @@ fi
 # ============================================
 print_status "Checking file type..."
 
-if file ${BINARY_NAME}.original | grep -q "shell script"; then
+if file "${BINARY_NAME}.original" | grep -q "shell script"; then
     print_info "File is a shell script - editing directly..."
     
-    cp ${BINARY_NAME}.original ${BINARY_NAME}
+    cp "${BINARY_NAME}.original" "${BINARY_NAME}"
     
     print_status "Removing IP restrictions..."
-    sed -i '/ifconfig.me/d' ${BINARY_NAME} 2>/dev/null || true
-    sed -i '/curl.*ifconfig/d' ${BINARY_NAME} 2>/dev/null || true
+    sed -i '/ifconfig.me/d' "${BINARY_NAME}" 2>/dev/null || true
+    sed -i '/curl.*ifconfig/d' "${BINARY_NAME}" 2>/dev/null || true
     
     print_status "Removing OS restrictions..."
-    sed -i '/lsb_release/d' ${BINARY_NAME} 2>/dev/null || true
-    sed -i '/hostname/d' ${BINARY_NAME} 2>/dev/null || true
+    sed -i '/lsb_release/d' "${BINARY_NAME}" 2>/dev/null || true
+    sed -i '/hostname/d' "${BINARY_NAME}" 2>/dev/null || true
     
     print_status "Removing server whitelist..."
-    sed -i '/allowed_servers/d' ${BINARY_NAME} 2>/dev/null || true
+    sed -i '/allowed_servers/d' "${BINARY_NAME}" 2>/dev/null || true
     
     print_status "Removing exit commands..."
-    sed -i '/exit 1.*IP/d' ${BINARY_NAME} 2>/dev/null || true
-    sed -i '/exit 1.*server/d' ${BINARY_NAME} 2>/dev/null || true
-    sed -i '/exit 1.*ubuntu/d' ${BINARY_NAME} 2>/dev/null || true
-    sed -i '/exit 1.*hostname/d' ${BINARY_NAME} 2>/dev/null || true
+    sed -i '/exit 1.*IP/d' "${BINARY_NAME}" 2>/dev/null || true
+    sed -i '/exit 1.*server/d' "${BINARY_NAME}" 2>/dev/null || true
+    sed -i '/exit 1.*ubuntu/d' "${BINARY_NAME}" 2>/dev/null || true
+    sed -i '/exit 1.*hostname/d' "${BINARY_NAME}" 2>/dev/null || true
     
     print_success "All restrictions removed from script"
     
 else
     print_info "File is binary - building wrapper..."
     
-    mv ${BINARY_NAME}.original ${BINARY_NAME}.bin
-    chmod +x ${BINARY_NAME}.bin
+    mv "${BINARY_NAME}.original" "${BINARY_NAME}.bin"
+    chmod +x "${BINARY_NAME}.bin"
     
-    cat > ${BINARY_NAME} << 'EOF'
+    cat > "${BINARY_NAME}" << 'EOF'
 #!/bin/bash
 # Stinger Wrapper - Unlocked Version
 
@@ -129,7 +130,7 @@ else
 fi
 EOF
 
-    chmod +x ${BINARY_NAME}
+    chmod +x "${BINARY_NAME}"
     print_success "Wrapper created and binary is ready"
 fi
 
@@ -157,7 +158,7 @@ fi
 # ============================================
 # Step 6: Make executable
 # ============================================
-chmod +x ${BINARY_NAME}
+chmod +x "${BINARY_NAME}"
 print_success "${BINARY_NAME} is ready to run!"
 
 echo ""
@@ -167,18 +168,14 @@ echo "=========================================="
 echo ""
 
 # ============================================
-# Step 7: Interactive Menu
+# Step 7: Interactive Menu (Fixed to use your functions)
 # ============================================
-echo "═══════════════════════════════════════════"
-echo "  📋 Main Menu"
-echo "═══════════════════════════════════════════"
+print_header "📋 Main Menu"
 echo ""
-echo "  1. ▶️  Run Stinger Unlocked"
-echo "  2. 📝  Edit config.toml"
-echo "  3. ℹ️  Show file info"
-echo "  4. 🚪  Exit"
-echo ""
-echo "═══════════════════════════════════════════"
+print_menu "1. ▶️  Run Stinger Unlocked"
+print_menu "2. 📝  Edit config.toml"
+print_menu "3. ℹ️  Show file info"
+print_menu "4. 🚪  Exit"
 echo ""
 
 read -p "Select an option [1-4]: " USER_CHOICE
@@ -186,9 +183,9 @@ echo ""
 
 case $USER_CHOICE in
     1)
-        echo -e "${GREEN}▶ Running Stinger Unlocked...${NC}"
+        print_header "Running Stinger Unlocked..."
         echo "=========================================="
-        ./${BINARY_NAME}
+        ./"${BINARY_NAME}"
         ;;
     2)
         if [ -f "config.toml" ]; then
@@ -198,7 +195,7 @@ case $USER_CHOICE in
             read -p "Run Stinger with new config? (y/N): " -n 1 -r
             echo
             if [[ $REPLY =~ ^[Yy]$ ]]; then
-                ./${BINARY_NAME}
+                ./"${BINARY_NAME}"
             fi
         else
             print_error "config.toml not found!"
@@ -206,13 +203,13 @@ case $USER_CHOICE in
         ;;
     3)
         echo ""
-        echo "📄 File Information:"
+        print_header "📄 File Information:"
         echo "═══════════════════════════════════════════"
         if [ -f "${BINARY_NAME}" ]; then
             echo "  File: ${BINARY_NAME}"
-            echo "  Size: $(du -h ${BINARY_NAME} | cut -f1)"
-            echo "  Date: $(date -r ${BINARY_NAME} '+%Y-%m-%d %H:%M:%S')"
-            file ${BINARY_NAME} | head -1
+            echo "  Size: $(du -h "${BINARY_NAME}" | cut -f1)"
+            echo "  Date: $(date -r "${BINARY_NAME}" '+%Y-%m-%d %H:%M:%S')"
+            file "${BINARY_NAME}" | head -1
         fi
         if [ -f "config.toml" ]; then
             echo "  Config: config.toml ($(wc -l < config.toml) lines)"
@@ -225,7 +222,7 @@ case $USER_CHOICE in
         ;;
     *)
         print_warning "Invalid option, running default..."
-        ./${BINARY_NAME}
+        ./"${BINARY_NAME}"
         ;;
 esac
 
