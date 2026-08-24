@@ -1,5 +1,3 @@
-rm -f stinger-installer.sh stinger stinger.bin config.toml stinger.log stinger.pid 2>/dev/null
-cat > stinger-installer.sh << 'EOF'
 #!/bin/bash
 set -e
 
@@ -18,11 +16,7 @@ print_info() { echo -e "${CYAN}[i]${NC} $1"; }
 BINARY_NAME="stinger"
 ORIGINAL_URL="https://github.com/lostsoul6/stinger-binary/raw/refs/heads/main/stinger"
 
-# ============================================
-# Start Stinger in Background (Automatic)
-# ============================================
 start_stinger() {
-    # Stop any existing instance first
     pkill -f "stinger.bin" 2>/dev/null || true
     pkill -x "stinger" 2>/dev/null || true
     sleep 1
@@ -48,9 +42,6 @@ start_stinger() {
     fi
 }
 
-# ============================================
-# Stop Stinger
-# ============================================
 stop_stinger() {
     echo ""
     print_header "🛑 Stopping Stinger..."
@@ -71,9 +62,6 @@ stop_stinger() {
     fi
 }
 
-# ============================================
-# Uninstall Function
-# ============================================
 uninstall_stinger() {
     echo ""
     print_header "🗑️  Uninstalling Stinger..."
@@ -86,9 +74,6 @@ uninstall_stinger() {
     echo ""; print_success "✅ Uninstall completed! All files and processes removed."
 }
 
-# ============================================
-# Install & Start Server Function
-# ============================================
 install_server() {
     echo ""; print_header "🖥️  Installing & Starting Stinger Server..."
     
@@ -116,9 +101,9 @@ WRAPPER
     fi
     
     echo ""
-    read -p "  🌐 Enter Remote IP (Client IP or 0.0.0.0 for any) [0.0.0.0]: " REMOTE_IP
+    read -p "  🌐 Enter Remote IP (Client IP or 0.0.0.0 for any) [0.0.0.0]: " REMOTE_IP < /dev/tty
     REMOTE_IP=${REMOTE_IP:-0.0.0.0}
-    read -p "  🔗 Enter Server Port [8080]: " SERVER_PORT
+    read -p "  🔗 Enter Server Port [8080]: " SERVER_PORT < /dev/tty
     SERVER_PORT=${SERVER_PORT:-8080}
     
     print_status "Creating SERVER configuration..."
@@ -126,9 +111,14 @@ WRAPPER
 mode = "server"
 remote_ip = "${REMOTE_IP}"
 
+[general]
+mode = "server"
+remote_ip = "${REMOTE_IP}"
+
 [server]
 host = "0.0.0.0"
 port = ${SERVER_PORT}
+remote_ip = "${REMOTE_IP}"
 EOF
     
     chmod +x "${BINARY_NAME}"
@@ -138,9 +128,6 @@ EOF
     start_stinger
 }
 
-# ============================================
-# Install & Start Client Function
-# ============================================
 install_client() {
     echo ""; print_header "💻 Installing & Starting Stinger Client..."
     
@@ -168,9 +155,9 @@ WRAPPER
     fi
     
     echo ""
-    read -p "  🌐 Enter Server IP (remote_ip) [127.0.0.1]: " SERVER_IP
+    read -p "  🌐 Enter Server IP (remote_ip) [127.0.0.1]: " SERVER_IP < /dev/tty
     SERVER_IP=${SERVER_IP:-127.0.0.1}
-    read -p "  🔗 Enter Server Port [8080]: " SERVER_PORT
+    read -p "  🔗 Enter Server Port [8080]: " SERVER_PORT < /dev/tty
     SERVER_PORT=${SERVER_PORT:-8080}
     
     print_status "Creating CLIENT configuration..."
@@ -178,9 +165,14 @@ WRAPPER
 mode = "client"
 remote_ip = "${SERVER_IP}"
 
+[general]
+mode = "client"
+remote_ip = "${SERVER_IP}"
+
 [client]
 server_host = "${SERVER_IP}"
 server_port = ${SERVER_PORT}
+remote_ip = "${SERVER_IP}"
 EOF
     
     chmod +x "${BINARY_NAME}"
@@ -190,14 +182,10 @@ EOF
     start_stinger
 }
 
-# ============================================
-# Check Status Function
-# ============================================
 check_status() {
     echo ""; print_header "🔍 Checking Stinger Status..."
     echo "═══════════════════════════════════════════"
     
-    # 1. Check Process
     echo -e "\n${YELLOW}[1] Process Status:${NC}"
     if [ -f "stinger.pid" ]; then
         PID=$(cat stinger.pid)
@@ -216,7 +204,6 @@ check_status() {
         fi
     fi
 
-    # 2. Check Tunnel Interfaces
     echo -e "\n${YELLOW}[2] Tunnel Interfaces (TUN/TAP):${NC}"
     if command -v ip &> /dev/null; then
         TUN_INTERFACES=$(ip link show | grep -iE "tun|tap|stinger|flagtun|utun" | awk -F: '{print $2}' | tr -d ' ')
@@ -231,7 +218,6 @@ check_status() {
         fi
     fi
 
-    # 3. Check Listening Ports
     echo -e "\n${YELLOW}[3] Network / Ports:${NC}"
     if command -v ss &> /dev/null; then
         PORTS=$(ss -tuln | grep -E ":8080|:51820|stinger")
@@ -243,7 +229,6 @@ check_status() {
         fi
     fi
 
-    # 4. Check Logs
     echo -e "\n${YELLOW}[4] Recent Logs:${NC}"
     if [ -f "stinger.log" ]; then
         tail -n 5 stinger.log | sed 's/^/  /'
@@ -252,12 +237,9 @@ check_status() {
     fi
 
     echo -e "\n═══════════════════════════════════════════"
-    read -p "Press Enter to return to menu..."
+    read -p "Press Enter to return to menu..." < /dev/tty
 }
 
-# ============================================
-# Main Menu Loop
-# ============================================
 while true; do
     clear
     echo "═══════════════════════════════════════════"
@@ -272,18 +254,15 @@ while true; do
     print_menu "6. 🚪 Exit"
     echo ""
 
-    read -p "Select an option [1-6]: " CHOICE
+    read -p "Select an option [1-6]: " CHOICE < /dev/tty
 
     case $CHOICE in
-        1) install_server; read -p "Press Enter to continue..." ;;
-        2) install_client; read -p "Press Enter to continue..." ;;
+        1) install_server; read -p "Press Enter to continue..." < /dev/tty ;;
+        2) install_client; read -p "Press Enter to continue..." < /dev/tty ;;
         3) check_status ;;
-        4) stop_stinger; read -p "Press Enter to continue..." ;;
-        5) uninstall_stinger; read -p "Press Enter to continue..." ;;
+        4) stop_stinger; read -p "Press Enter to continue..." < /dev/tty ;;
+        5) uninstall_stinger; read -p "Press Enter to continue..." < /dev/tty ;;
         6) print_info "Exiting..."; exit 0 ;;
         *) print_warning "Invalid option"; sleep 1 ;;
     esac
 done
-EOF
-chmod +x stinger-installer.sh
-./stinger-installer.sh
