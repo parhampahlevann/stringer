@@ -39,6 +39,7 @@ start_stinger() {
         echo ""
         print_header "📋 Error log:"
         cat stinger.log | sed 's/^/  /'
+        rm -f stinger.pid # Clean up stale PID on crash
     fi
 }
 
@@ -52,7 +53,7 @@ stop_stinger() {
             print_success "Stinger stopped (PID: $PID)."
             rm -f stinger.pid
         else
-            print_warning "Process not running."
+            print_warning "Process not running. Cleaning up PID file."
             rm -f stinger.pid
         fi
     else
@@ -71,6 +72,7 @@ uninstall_stinger() {
     [ -f "stinger.original" ] && rm -f "stinger.original" && print_success "Removed: stinger.original"
     [ -f "config.toml" ] && rm -f "config.toml" && print_success "Removed: config.toml"
     [ -f "stinger.log" ] && rm -f "stinger.log" && print_success "Removed: stinger.log"
+    [ -f "stinger.pid" ] && rm -f "stinger.pid" && print_success "Removed: stinger.pid"
     echo ""; print_success "✅ Uninstall completed! All files and processes removed."
 }
 
@@ -105,24 +107,29 @@ WRAPPER
     REMOTE_IP=${REMOTE_IP:-0.0.0.0}
     read -p "  🔗 Enter Server Port [8080]: " SERVER_PORT < /dev/tty
     SERVER_PORT=${SERVER_PORT:-8080}
+    read -p "  🛜  Enter Local Tunnel IP (Server Virtual IP) [10.0.0.1/24]: " LOCAL_TUN < /dev/tty
+    LOCAL_TUN=${LOCAL_TUN:-10.0.0.1/24}
     
     print_status "Creating SERVER configuration..."
     cat > config.toml << EOF
 mode = "server"
 remote_ip = "${REMOTE_IP}"
+local_tun = "${LOCAL_TUN}"
 
 [general]
 mode = "server"
 remote_ip = "${REMOTE_IP}"
+local_tun = "${LOCAL_TUN}"
 
 [server]
 host = "0.0.0.0"
 port = ${SERVER_PORT}
 remote_ip = "${REMOTE_IP}"
+local_tun = "${LOCAL_TUN}"
 EOF
     
     chmod +x "${BINARY_NAME}"
-    print_success "✅ Server setup completed! (mode=server, remote_ip=${REMOTE_IP}, port=${SERVER_PORT})"
+    print_success "✅ Server setup completed! (mode=server, remote_ip=${REMOTE_IP}, port=${SERVER_PORT}, local_tun=${LOCAL_TUN})"
     
     echo ""
     start_stinger
@@ -159,24 +166,29 @@ WRAPPER
     SERVER_IP=${SERVER_IP:-127.0.0.1}
     read -p "  🔗 Enter Server Port [8080]: " SERVER_PORT < /dev/tty
     SERVER_PORT=${SERVER_PORT:-8080}
+    read -p "  🛜  Enter Local Tunnel IP (Client Virtual IP) [10.0.0.2/24]: " LOCAL_TUN < /dev/tty
+    LOCAL_TUN=${LOCAL_TUN:-10.0.0.2/24}
     
     print_status "Creating CLIENT configuration..."
     cat > config.toml << EOF
 mode = "client"
 remote_ip = "${SERVER_IP}"
+local_tun = "${LOCAL_TUN}"
 
 [general]
 mode = "client"
 remote_ip = "${SERVER_IP}"
+local_tun = "${LOCAL_TUN}"
 
 [client]
 server_host = "${SERVER_IP}"
 server_port = ${SERVER_PORT}
 remote_ip = "${SERVER_IP}"
+local_tun = "${LOCAL_TUN}"
 EOF
     
     chmod +x "${BINARY_NAME}"
-    print_success "✅ Client setup completed! (mode=client, remote_ip=${SERVER_IP}, port=${SERVER_PORT})"
+    print_success "✅ Client setup completed! (mode=client, remote_ip=${SERVER_IP}, port=${SERVER_PORT}, local_tun=${LOCAL_TUN})"
     
     echo ""
     start_stinger
@@ -193,7 +205,8 @@ check_status() {
             print_success "Stinger is RUNNING (PID: $PID)."
             ps -p "$PID" -o pid,etime,cmd | tail -n +2 | awk '{print "  PID: " $1 " | Uptime: " $2}'
         else
-            print_error "Stinger is NOT RUNNING (stale PID file)."
+            print_error "Stinger is NOT RUNNING (stale PID file). Cleaning up..."
+            rm -f stinger.pid
         fi
     else
         if pgrep -f "stinger.bin" > /dev/null || pgrep -x "stinger" > /dev/null; then
