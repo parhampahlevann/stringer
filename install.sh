@@ -19,11 +19,13 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+# Functions
 print_status() { echo -e "${BLUE}[*]${NC} $1"; }
 print_success() { echo -e "${GREEN}[✓]${NC} $1"; }
 print_error() { echo -e "${RED}[✗]${NC} $1"; }
 print_warning() { echo -e "${YELLOW}[!]${NC} $1"; }
 print_info() { echo -e "${CYAN}[i]${NC} $1"; }
+print_header() { echo -e "${GREEN}▶${NC} $1"; }  # <-- THIS WAS MISSING
 
 clear
 echo "=========================================="
@@ -38,6 +40,8 @@ print_status "Checking operating system..."
 if [[ -f /etc/os-release ]]; then
     . /etc/os-release
     print_success "OS: $NAME $VERSION_ID"
+else
+    print_warning "OS could not be identified, continuing..."
 fi
 
 # ============================================
@@ -154,7 +158,7 @@ EOF
 fi
 
 # ============================================
-# Step 6: Make executable and run
+# Step 6: Make executable
 # ============================================
 chmod +x ${BINARY_NAME}
 print_success "${BINARY_NAME} is ready to run!"
@@ -165,7 +169,9 @@ print_success "✅ Installation completed!"
 echo "=========================================="
 echo ""
 
-# Interactive menu
+# ============================================
+# Step 7: Interactive Menu
+# ============================================
 echo "═══════════════════════════════════════════"
 echo "  📋 Main Menu"
 echo "═══════════════════════════════════════════"
@@ -189,6 +195,7 @@ case $REPLY in
         ;;
     2)
         if [ -f "config.toml" ]; then
+            print_info "Editing config.toml..."
             nano config.toml
             echo ""
             read -p "Run Stinger with new config? (y/N): " -n 1 -r
