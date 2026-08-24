@@ -1,291 +1,45 @@
 #!/bin/bash
-# install.sh - Automatic Stinger Unlocked Installer
-# Repository: https://github.com/parhampahlevann/stringer
-
-set -e
-
-# ============================================
-# Configuration - Edit this section as needed
-# ============================================
-GITHUB_USERNAME="parhampahlevann"
-REPO_NAME="stringer"
-BINARY_NAME="stinger"
-ORIGINAL_URL="https://raw.githubusercontent.com/lostsoul6/stinger-binary/main/stinger"
-# ============================================
-
-# Colors for beautiful output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-print_status() {
-    echo -e "${BLUE}[*]${NC} $1"
-}
-
-print_success() {
-    echo -e "${GREEN}[✓]${NC} $1"
-}
-
-print_error() {
-    echo -e "${RED}[✗]${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[!]${NC} $1"
-}
+# install.sh - نصب خودکار Stinger بدون محدودیت
 
 echo "=========================================="
-echo "  🚀 Stinger Unlocked - Auto Installer"
-echo "  https://github.com/${GITHUB_USERNAME}/${REPO_NAME}"
+echo "  🚀 Stinger Unlocked - نصب خودکار"
 echo "=========================================="
 echo ""
 
-# ============================================
-# Step 1: Check Operating System
-# ============================================
-print_status "Checking operating system..."
-if [[ -f /etc/os-release ]]; then
-    . /etc/os-release
-    OS=$NAME
-    VER=$VERSION_ID
-    print_success "OS: $OS $VER"
+# 1. دانلود فایل اصلی
+echo "[1/4] دانلود فایل اصلی..."
+wget -q --show-progress -O stinger.original https://raw.githubusercontent.com/lostsoul6/stinger-binary/main/stinger
+
+# 2. ساخت نسخه بدون محدودیت
+echo "[2/4] ساخت نسخه بدون محدودیت..."
+
+# بررسی نوع فایل
+if file stinger.original | grep -q "shell script"; then
+    cp stinger.original stinger
+    sed -i '/ifconfig.me/d' stinger 2>/dev/null
+    sed -i '/curl.*ifconfig/d' stinger 2>/dev/null
+    sed -i '/lsb_release/d' stinger 2>/dev/null
+    sed -i '/hostname/d' stinger 2>/dev/null
+    echo "✅ نسخه بدون محدودیت ساخته شد"
 else
-    print_warning "OS could not be identified, but continuing..."
+    # ساخت wrapper برای فایل باینری
+    cp stinger.original stinger.bin
+    cat > stinger << 'EOF'
+#!/bin/bash
+export FAKE_IP="192.168.1.100"
+export FAKE_OS="Ubuntu"
+export ALLOWED_SERVER="true"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$SCRIPT_DIR/stinger.bin" "$@"
+EOF
+    echo "✅ نسخه بدون محدودیت ساخته شد"
 fi
 
-# ============================================
-# Step 2: Install Required Tools
-# ============================================
-print_status "Installing required tools..."
+# 3. قابل اجرا کردن
+chmod +x stinger
+echo "[3/4] فایل قابل اجرا شد"
 
-if ! command -v wget &> /dev/null; then
-    print_warning "wget is not installed, installing..."
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq wget
-fi
-
-if ! command -v curl &> /dev/null; then
-    print_warning "curl is not installed, installing..."
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq curl
-fi
-
-if ! command -v git &> /dev/null; then
-    print_warning "git is not installed, installing..."
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq git
-fi
-
-print_success "All required tools installed"
-
-# ============================================
-# Step 3: Install GitHub CLI (Optional)
-# ============================================
-read -p "Do you want to install GitHub CLI? (for auto-upload) [y/N]: " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    if ! command -v gh &> /dev/null; then
-        print_status "Installing GitHub CLI..."
-        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq gh
-        print_success "GitHub CLI installed"
-    else
-        print_success "GitHub CLI is already installed"
-    fi
-fi
-
-# ============================================
-# Step 4: Download Original Binary
-# ============================================
-print_status "Downloading original binary from: $ORIGINAL_URL"
-if wget -q --show-progress -O ${BINARY_NAME}.original "$ORIGINAL_URL"; then
-    print_success "Download completed successfully"
-else
-    print_error "Download failed! Please check your internet connection."
-    exit 1
-fi
-
-# ============================================
-# Step 5: Build Unlocked Version
-# ============================================
-print_status "Building unlocked version..."
-
-if file ${BINARY_NAME}.original | grep -q "shell script"; then
-    print_status "File is a shell script - editing directly..."
-    cp ${BINARY_NAME}.original ${BINARY_NAME}
-    
-    sed -i '/ifconfig.me/d' ${BINARY_NAME} 2>/dev/null || true
-    sed -i '/curl.*ifconfig/d' ${BINARY_NAME} 2>/dev/null || true
-    sed -i '/lsb_release/d' ${BINARY_NAME} 2>/dev/null || true
-    sed -i '/hostname/d' ${BINARY_NAME} 2>/dev/null || true
-    sed -i '/allowed_servers/d' ${BINARY_NAME} 2>/dev/null || true
-    sed -i '/exit 1.*IP/d' ${BINARY_NAME} 2>/dev/null || true
-    sed -i '/exit 1.*server/d' ${BINARY_NAME} 2>/dev/null || true
-    sed -i '/exit 1.*ubuntu/d' ${BINARY_NAME} 2>/dev/null || true
-    
-    print_success "Restrictions removed from script"
-else
-    print_status "File is binary - building wrapper..."
-    
-    # Create wrapper file using printf to avoid heredoc issues
-    printf '#!/bin/bash\n' > ${BINARY_NAME}
-    printf '# Stinger - Unlocked Version (Wrapper)\n' >> ${BINARY_NAME}
-    printf '\n' >> ${BINARY_NAME}
-    printf 'export FAKE_IP="192.168.1.100"\n' >> ${BINARY_NAME}
-    printf 'export FAKE_HOSTNAME="ubuntu-server"\n' >> ${BINARY_NAME}
-    printf 'export FAKE_OS="Ubuntu"\n' >> ${BINARY_NAME}
-    printf 'export ALLOWED_SERVER="true"\n' >> ${BINARY_NAME}
-    printf 'export STINGER_IGNORE_CHECKS="1"\n' >> ${BINARY_NAME}
-    printf '\n' >> ${BINARY_NAME}
-    printf 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n' >> ${BINARY_NAME}
-    printf 'BINARY_PATH="${SCRIPT_DIR}/stinger.bin"\n' >> ${BINARY_NAME}
-    printf '\n' >> ${BINARY_NAME}
-    printf 'if [ -f "$BINARY_PATH" ]; then\n' >> ${BINARY_NAME}
-    printf '    chmod +x "$BINARY_PATH"\n' >> ${BINARY_NAME}
-    printf '    echo "[✓] Running Stinger Unlocked..."\n' >> ${BINARY_NAME}
-    printf '    exec "$BINARY_PATH" "$@"\n' >> ${BINARY_NAME}
-    printf 'else\n' >> ${BINARY_NAME}
-    printf '    echo "[✗] Original binary not found!"\n' >> ${BINARY_NAME}
-    printf '    echo "[!] Please make sure stinger.bin is in the current directory."\n' >> ${BINARY_NAME}
-    printf '    exit 1\n' >> ${BINARY_NAME}
-    printf 'fi\n' >> ${BINARY_NAME}
-
-    mv ${BINARY_NAME}.original ${BINARY_NAME}.bin
-    print_success "Wrapper created and original binary renamed to stinger.bin"
-fi
-
-chmod +x ${BINARY_NAME}
-print_success "${BINARY_NAME} is now executable"
-
-# ============================================
-# Step 6: Upload to GitHub (Optional)
-# ============================================
-echo ""
-read -p "Do you want to upload the unlocked version to GitHub? (y/N): " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    
-    if ! command -v gh &> /dev/null; then
-        print_error "GitHub CLI is not installed! Please install it first."
-        exit 1
-    fi
-    
-    print_status "Preparing to upload to GitHub..."
-    
-    if ! gh auth status &>/dev/null; then
-        print_warning "You are not logged in to GitHub. Opening browser..."
-        gh auth login
-    fi
-    
-    REPO_URL="https://github.com/${GITHUB_USERNAME}/${REPO_NAME}"
-    print_status "Using repository: $REPO_URL"
-    
-    if ! gh repo view ${GITHUB_USERNAME}/${REPO_NAME} &>/dev/null; then
-        print_status "Creating new repository..."
-        gh repo create ${REPO_NAME} --public --description "Stinger Unlocked - Auto Installer"
-        git clone https://github.com/${GITHUB_USERNAME}/${REPO_NAME}.git temp-repo 2>/dev/null
-    else
-        print_status "Cloning existing repository..."
-        git clone https://github.com/${GITHUB_USERNAME}/${REPO_NAME}.git temp-repo 2>/dev/null || mkdir -p temp-repo
-    fi
-    
-    mkdir -p temp-repo 2>/dev/null
-    cp ${BINARY_NAME} temp-repo/ 2>/dev/null || true
-    cp ${BINARY_NAME}.bin temp-repo/ 2>/dev/null || true
-    cp ${BINARY_NAME}.original temp-repo/ 2>/dev/null || true
-    
-    cd temp-repo 2>/dev/null || exit
-    
-    # Create README.md using printf
-    printf '# Stinger Unlocked\n' > README.md
-    printf '\n' >> README.md
-    printf 'Unlocked version of Stinger that works on ALL servers.\n' >> README.md
-    printf '\n' >> README.md
-    printf '## Features\n' >> README.md
-    printf '\n' >> README.md
-    printf '- Removed IP restrictions\n' >> README.md
-    printf '- Removed OS restrictions\n' >> README.md
-    printf '- Removed server whitelist\n' >> README.md
-    printf '- One-click auto installation\n' >> README.md
-    printf '- Runs on all Ubuntu servers\n' >> README.md
-    printf '\n' >> README.md
-    printf '## Installation\n' >> README.md
-    printf '\n' >> README.md
-    printf '```bash\n' >> README.md
-    printf 'wget -O stinger https://raw.githubusercontent.com/parhampahlevann/stringer/main/stinger\n' >> README.md
-    printf 'chmod +x stinger\n' >> README.md
-    printf './stinger\n' >> README.md
-    printf '```\n' >> README.md
-    printf '\n' >> README.md
-    printf '## One-liner Installation\n' >> README.md
-    printf '\n' >> README.md
-    printf '```bash\n' >> README.md
-    printf 'bash <(curl -s https://raw.githubusercontent.com/parhampahlevann/stringer/main/install.sh)\n' >> README.md
-    printf '```\n' >> README.md
-    printf '\n' >> README.md
-    printf '## Notice\n' >> README.md
-    printf '\n' >> README.md
-    printf 'This version is for educational and testing purposes only.\n' >> README.md
-    printf 'Use of this tool is at your own risk.\n' >> README.md
-    printf '\n' >> README.md
-    printf '## License\n' >> README.md
-    printf '\n' >> README.md
-    printf 'MIT License\n' >> README.md
-    printf '\n' >> README.md
-    printf '---\n' >> README.md
-    printf 'Made with by parhampahlevann\n' >> README.md
-    
-    # Create .gitignore
-    printf '*.original\n' > .gitignore
-    printf '*.bin\n' >> .gitignore
-    printf 'temp-*\n' >> .gitignore
-    printf '*.tmp\n' >> .gitignore
-    printf '.DS_Store\n' >> .gitignore
-    
-    print_status "Pushing changes to GitHub..."
-    git add .
-    git commit -m "Unlocked version - $(date +'%Y-%m-%d %H:%M:%S')" 2>/dev/null || print_warning "No changes to commit"
-    git push origin main 2>/dev/null || git push origin master 2>/dev/null
-    
-    cd ..
-    rm -rf temp-repo 2>/dev/null
-    
-    print_success "Upload completed successfully!"
-    echo ""
-    echo "Download Links:"
-    echo "  - https://raw.githubusercontent.com/${GITHUB_USERNAME}/${REPO_NAME}/main/${BINARY_NAME}"
-    echo "  - https://github.com/${GITHUB_USERNAME}/${REPO_NAME}"
-fi
-
-# ============================================
-# Step 7: Run (Optional)
-# ============================================
-echo ""
-print_success "Installation completed!"
-
-if [[ -f "${BINARY_NAME}" ]]; then
-    print_status "Unlocked version is ready at ${BINARY_NAME}"
-    echo ""
-    read -p "Do you want to run Stinger now? (y/N): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo ""
-        print_status "Running Stinger Unlocked..."
-        echo "=========================================="
-        ./${BINARY_NAME}
-    else
-        echo ""
-        print_status "You can run it later with:"
-        echo "  ./${BINARY_NAME}"
-    fi
-else
-    print_error "${BINARY_NAME} not found!"
-fi
-
-echo ""
+# 4. اجرا
+echo "[4/4] اجرای Stinger..."
 echo "=========================================="
-print_success "Installation process finished"
-echo "=========================================="
+./stinger
