@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# ICMP-over-VPN Tunnel Manager (FIXED)
+# ICMP-over-VPN Tunnel Manager (FIXED v2)
 # Built on ptunnel-ng (https://github.com/utoni/ptunnel-ng)
 # ============================================================================
 
@@ -33,10 +33,11 @@ install_build_deps() {
     print_status "Installing build dependencies..."
     apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        build-essential autoconf automake libtool pkg-config git iptables tcpdump iproute2 >/dev/null
+        build-essential autoconf automake libtool pkg-config git \
+        iptables tcpdump iproute2 libpcap-dev libpcap0.8 >/dev/null
 }
 
-# FIX 1: explicitly run autogen → configure → make
+# FIX: full build chain — autogen → configure → make
 build_ptunnel() {
     if [ -x "$BIN_PATH" ]; then
         print_success "ptunnel-ng already built at $BIN_PATH"
@@ -50,7 +51,7 @@ build_ptunnel() {
         git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
     fi
     ( cd "$INSTALL_DIR" && ./autogen.sh ) || { print_error "autogen.sh failed"; return 1; }
-    ( cd "$INSTALL_DIR" && ./configure ) || { print_error "configure failed"; return 1; }
+    ( cd "$INSTALL_DIR" && ./configure )  || { print_error "configure failed"; return 1; }
     ( cd "$INSTALL_DIR" && make -j"$(nproc)" ) || { print_error "make failed"; return 1; }
     if [ ! -x "$BIN_PATH" ]; then
         print_error "Build done but binary not at $BIN_PATH"
@@ -59,18 +60,19 @@ build_ptunnel() {
     print_success "Built $BIN_PATH"
 }
 
-# FIX 2: better ICMP handling — disable rate limit too
 allow_icmp_firewall() {
     print_status "Configuring firewall for ICMP..."
     iptables -C INPUT  -p icmp -j ACCEPT 2>/dev/null || iptables -A INPUT  -p icmp -j ACCEPT
     iptables -C OUTPUT -p icmp -j ACCEPT 2>/dev/null || iptables -A OUTPUT -p icmp -j ACCEPT
-    # Disable ICMP rate limiting (kernel can silently drop ping floods otherwise)
-    sysctl -w net.ipv4.icmp_ratelimit=0    >/dev/null 2>&1 || true
-    sysctl -w net.ipv4.icmp_ratemask=0     >/dev/null 2>&1 || true
-    # Persist sysctl
+    # Disable ICMP rate limiting — kernel can silently drop ping bursts
+    sysctl -w net.ipv4.icmp_ratelimit=0 >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.icmp_ratemask=0  >/dev/null 2>&1 || true
     grep -q 'icmp_ratelimit' /etc/sysctl.conf 2>/dev/null || \
         printf 'net.ipv4.icmp_ratelimit=0\nnet.ipv4.icmp_ratemask=0\n' >> /etc/sysctl.conf
-    # Persist iptables
+    save_iptables
+}
+
+save_iptables() {
     if command -v netfilter-persistent &>/dev/null; then
         netfilter-persistent save >/dev/null 2>&1 || true
     else
@@ -79,7 +81,30 @@ allow_icmp_firewall() {
     fi
 }
 
-# FIX 3: write env file with SINGLE-QUOTED values (prevents "command not found")
+# FIX: open extra TCP ports (comma-separated input)
+open_extra_ports() {
+    local ports_str="$1"
+    [ -z "$ports_str" ] && return 0
+    local IFS=','
+    local port
+    for port in $ports_str; do
+        # trim whitespace
+        port="${port#"${port%%[![:space:]]*}"}"
+        port="${port%"${port##*[![:space:]]}"}"
+        [ -z "$port" ] && continue
+        if ! [[ "$port" =~ ^[0-9]+$ ]]; then
+            print_warning "Skipping invalid port: $port"
+            continue
+        fi
+        iptables -C INPUT  -p tcp --dport "$port" -j ACCEPT 2>/dev/null || \
+            iptables -A INPUT  -p tcp --dport "$port" -j ACCEPT
+        iptables -C OUTPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || \
+            iptables -A OUTPUT -p tcp --dport "$port" -j ACCEPT
+        print_info "Opened TCP port $port (in/out)"
+    done
+    save_iptables
+}
+
 write_env_file() {
     local file="$1"; shift
     mkdir -p "$(dirname "$file")"
@@ -87,7 +112,6 @@ write_env_file() {
     while [ $# -ge 2 ]; do
         local key="$1"
         local val="$2"
-        # escape any single quotes inside value
         val="${val//\'/\'\\\'\'}"
         printf "%s='%s'\n" "$key" "$val" >> "$file"
         shift 2
@@ -97,7 +121,6 @@ write_env_file() {
 
 write_systemd_service() {
     local name="$1" exec_line="$2"
-    # Stop & remove any stale unit first
     systemctl stop    "$name" 2>/dev/null || true
     systemctl disable "$name" 2>/dev/null || true
     cat > "/etc/systemd/system/${name}.service" <<EOF
@@ -119,13 +142,24 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
     systemctl enable "$name" >/dev/null 2>&1
+    if [ ! -f "/etc/systemd/system/${name}.service" ]; then
+        print_error "Failed to write service file for $name"
+        return 1
+    fi
+    return 0
+}
+
+# FIX: reliable service detection — systemctl cat reads the unit file directly
+service_installed() {
+    local svc="$1"
+    systemctl cat "$svc" &>/dev/null
 }
 
 install_server() {
     echo ""; print_header "Install ICMP Tunnel SERVER (inside filtered network)"
     require_root
     install_build_deps
-    build_ptunnel || return 1
+    build_ptunnel || { print_error "Build failed — cannot continue"; return 1; }
 
     read -p "  Destination IP (default 127.0.0.1): " DEST_IP </dev/tty
     DEST_IP=${DEST_IP:-127.0.0.1}
@@ -145,7 +179,13 @@ install_server() {
     [ -n "$MAGIC" ] && exec_args+=" -m${MAGIC}"
 
     allow_icmp_firewall
-    write_systemd_service "$SERVER_SERVICE" "$exec_args"
+    write_systemd_service "$SERVER_SERVICE" "$exec_args" || return 1
+
+    # FIX: ask for extra ports (comma-separated)
+    echo ""
+    read -p "  Extra TCP ports to allow through firewall (comma-separated, e.g. 1194,443 — blank for none): " EXTRA_PORTS </dev/tty
+    open_extra_ports "$EXTRA_PORTS"
+
     systemctl restart "$SERVER_SERVICE"
     sleep 2
     if systemctl is-active --quiet "$SERVER_SERVICE"; then
@@ -161,7 +201,7 @@ install_client() {
     echo ""; print_header "Install ICMP Tunnel CLIENT (outside / VPN entry)"
     require_root
     install_build_deps
-    build_ptunnel || return 1
+    build_ptunnel || { print_error "Build failed — cannot continue"; return 1; }
 
     read -p "  Server public IP: " SERVER_IP </dev/tty
     if [ -z "$SERVER_IP" ]; then
@@ -178,19 +218,25 @@ install_client() {
     read -p "  Magic value (must match server): " MAGIC </dev/tty
 
     write_env_file "$CONF_FILE" \
-        SERVER_IP  "$SERVER_IP"  \
+        SERVER_IP   "$SERVER_IP"  \
         LISTEN_PORT "$LISTEN_PORT" \
-        DEST_IP    "$DEST_IP"    \
-        DEST_PORT  "$DEST_PORT"  \
-        TPASS      "$TPASS"      \
-        MAGIC      "$MAGIC"
+        DEST_IP     "$DEST_IP"    \
+        DEST_PORT   "$DEST_PORT"  \
+        TPASS       "$TPASS"      \
+        MAGIC       "$MAGIC"
 
     local exec_args="${BIN_PATH} -p${SERVER_IP} -l${LISTEN_PORT} -r${DEST_IP} -R${DEST_PORT} -v1"
     [ -n "$TPASS" ] && exec_args+=" -P${TPASS}"
     [ -n "$MAGIC" ] && exec_args+=" -m${MAGIC}"
 
     allow_icmp_firewall
-    write_systemd_service "$CLIENT_SERVICE" "$exec_args"
+    write_systemd_service "$CLIENT_SERVICE" "$exec_args" || return 1
+
+    # FIX: ask for extra ports (comma-separated)
+    echo ""
+    read -p "  Extra TCP ports to allow through firewall (comma-separated, e.g. 8000,1194 — blank for none): " EXTRA_PORTS </dev/tty
+    open_extra_ports "$EXTRA_PORTS"
+
     systemctl restart "$CLIENT_SERVICE"
     sleep 2
     if systemctl is-active --quiet "$CLIENT_SERVICE"; then
@@ -203,11 +249,12 @@ install_client() {
     fi
 }
 
+# FIX: uses systemctl cat for reliable detection
 status_tunnel() {
     echo ""; print_header "Status"
     local found=0
     for svc in "$SERVER_SERVICE" "$CLIENT_SERVICE"; do
-        if systemctl list-unit-files | grep -q "^${svc}.service"; then
+        if service_installed "$svc"; then
             found=1
             echo ""
             systemctl status "$svc" --no-pager -l | head -n 15
@@ -215,7 +262,7 @@ status_tunnel() {
     done
     [ $found -eq 0 ] && print_warning "No tunnel service installed on this host."
     echo ""
-    print_info "Listening TCP ports (look for ptunnel-ng / your LISTEN_PORT):"
+    print_info "Listening TCP ports:"
     ss -tlnp 2>/dev/null | grep -E 'ptunnel' || true
     read -p "Press Enter..." </dev/tty
 }
@@ -228,7 +275,6 @@ debug_traffic() {
     read -p "Press Enter..." </dev/tty
 }
 
-# FIX 4: real connection test — ping + check listener
 test_connection() {
     echo ""; print_header "Connection test"
     if [ ! -f "$CONF_FILE" ]; then
@@ -236,7 +282,6 @@ test_connection() {
         read -p "Press Enter..." </dev/tty
         return
     fi
-    # Safe parse — only read KEY='value' lines
     local SERVER_IP="" LISTEN_PORT=""
     while IFS= read -r line; do
         case "$line" in
@@ -264,14 +309,13 @@ test_connection() {
     read -p "Press Enter..." </dev/tty
 }
 
-# FIX 5: only restart actually-installed services
 restart_tunnel() {
     local restarted=0
-    if systemctl list-unit-files | grep -q "^${SERVER_SERVICE}.service"; then
+    if service_installed "$SERVER_SERVICE"; then
         systemctl restart "$SERVER_SERVICE" 2>/dev/null && \
             { print_success "Restarted $SERVER_SERVICE"; restarted=1; }
     fi
-    if systemctl list-unit-files | grep -q "^${CLIENT_SERVICE}.service"; then
+    if service_installed "$CLIENT_SERVICE"; then
         systemctl restart "$CLIENT_SERVICE" 2>/dev/null && \
             { print_success "Restarted $CLIENT_SERVICE"; restarted=1; }
     fi
